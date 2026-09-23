@@ -1,0 +1,68 @@
+# GPU Goblin control plane. Install as /etc/systemd/system/gg-server.service (docs/DEPLOY.md).
+#
+# Listens on 127.0.0.1:8080 only; Caddy terminates HTTPS in front of it. PostgreSQL is reached over
+# its Unix socket with peer authentication: no database password exists anywhere.
+[Unit]
+Description=GPU Goblin control plane (gg-server)
+Documentation=https://github.com/GPU-Goblin/gg-server/blob/main/docs/DEPLOY.md
+After=network-online.target postgresql.service postgresql@17-main.service
+Wants=network-online.target postgresql.service
+# Give up after 10 failed starts in 5 minutes instead of looping forever (the monitor then alerts).
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+User=gg
+Group=gg
+ExecStart=/usr/local/bin/gg-server --config /etc/gpu-goblin/server.toml run
+# SIGTERM (the default) stops the server gracefully: in-flight requests, background loops.
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5s
+
+# Optional overrides (GG_* variables, RUST_LOG). No secret is needed by this configuration.
+Environment=RUST_LOG=info,sqlx=warn
+EnvironmentFile=/etc/gpu-goblin/domain.env
+EnvironmentFile=-/etc/gpu-goblin/server.env
+
+# /var/lib/gpu-goblin (owned by gg): server/objects, server/server.key, server/audit.secret.
+StateDirectory=gpu-goblin
+StateDirectoryMode=0750
+UMask=0077
+LimitNOFILE=65536
+
+# --- Hardening (systemd.exec(5)). Check with: systemd-analyze security gg-server.service ---------
+NoNewPrivileges=yes
+ProtectSystem=strict
+# StateDirectory= is writable; nothing else is.
+ReadWritePaths=
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# TCP (clients, and the dial-back to announced peer addresses) and the PostgreSQL Unix socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

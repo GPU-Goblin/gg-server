@@ -1,0 +1,139 @@
+# Production configuration of gg-server for the private beta. Install as /etc/gpu-goblin/server.toml
+# (owner root, group gg, mode 0640). docs/DEPLOY.md explains every step.
+#
+# Nothing in this file is secret: PostgreSQL is reached with peer authentication over its Unix socket
+# (no password), the server signing key is generated in data_dir at first start, and ORCID is off.
+# Environment variables GG_* (and DATABASE_URL) override these values; keep them unset in production
+# so that this file stays the single source of truth.
+#
+# The public host name does not appear here: it lives in /etc/gpu-goblin/domain.env, which the unit
+# loads (GG_PUBLIC_URL, the address researchers use: https://grid.gpugoblin.com), and in the
+# contributors' worker.toml (docs/DEPLOY.md, "Domain").
+
+# Unix socket, peer authentication: the OS user gg is the database role gg.
+database_url = "postgres://gg@localhost/gpu_goblin?host=/var/run/postgresql"
+# Loopback only: Caddy (HTTPS) is the only way in. Never bind 0.0.0.0 here.
+bind_addr = "127.0.0.1:8080"
+# Caddy on this machine: the client address is read from X-Forwarded-For only when the connection
+# comes from it (per-client quotas, the address a worker is observed at). Never list anything else.
+trusted_proxies = ["127.0.0.1", "::1"]
+# objects/ (content-addressed store), server.key (signs receipts; back it up offline), audit.secret.
+data_dir = "/var/lib/gpu-goblin/server"
+# Bound into every signature and hash. Changing it later invalidates every signed object in flight:
+# choose it once. Lowercase letters, digits and '-', at most 32 characters. Releases for this grid
+# are built with the same identifier (cargo xtask release --network gg-beta-1).
+network_id = "gg-beta-1"
+pool_size = 16
+
+# Leases (seconds). Defaults, measured on the reference scenarios.
+lease_secs = 120
+lease_max_secs = 3600
+verification_lease_secs = 600
+pending_output_secs = 600
+claim_wait_max_secs = 30
+session_ttl_secs = 900
+challenge_ttl_secs = 120
+reaper_interval_secs = 5
+
+# Request bodies. Caddy's limit (deploy/server/Caddyfile, request_body max_size) is set just above
+# max_upload_bytes + 1024 so that the server, not the proxy, answers with its own error. Raise both
+# together, never one alone.
+max_upload_bytes = 1073741824      # 1 GiB per artifact upload (datasets, checkpoints, outputs)
+max_json_bytes = 1048576           # 1 MiB for every JSON route
+# How long a request may take. An upload is read whole before the answer: 3600 s for 1 GiB accepts
+# uplinks down to about 2.4 Mbit/s. Downloads stream and are not cut by these bounds.
+request_timeout_secs = 300
+upload_timeout_secs = 3600
+
+# Oldest gg-worker given tasks. Raise it after a release that fixes a correctness or security
+# problem: older workers then stop and ask to be updated (docs/RUNBOOK.md).
+min_worker_version = "0.1.0"
+
+# Research deployment that does not bill: every new project starts with this many credits, so
+# researchers never ask for any; tasks still reserve budget before they start, and the ledger keeps
+# recording who computed what.
+project_initial_grant = 1000000000000
+
+# Production posture. public = true refuses dev_mode, the simulated ORCID provider and private peer
+# addresses; the server exits at start-up if any of them is set.
+dev_mode = false
+public = true
+
+# Quotas per actor: a researcher token, a portal session, a worker/validator session, or the client
+# IP (as forwarded by Caddy, see trusted_proxies) for anonymous routes.
+quota_requests_per_minute = 600
+quota_burst = 120
+# Worker and validator sessions download every input of every task: 10 x the base quota. Requests
+# covered by a live lease are not counted at all.
+quota_compute_multiplier = 10
+
+# Peer-to-peer artifact distribution (ADR-0012), on for the beta. The control plane keeps the durable
+# copy and signs chunk manifests; every chunk a worker receives from a peer is checked against them.
+# A contributor that shares becomes visible (ip:port) to the other workers authorized on the same
+# artifact: the contributor guide says so.
+p2p_enabled = true
+p2p_chunk_bytes = 1048576
+p2p_peer_ttl_secs = 300
+p2p_ticket_ttl_secs = 300
+p2p_max_peers = 8
+p2p_allow_private_addrs = false    # must stay false: refused when public = true
+p2p_dial_back = true               # only advertise addresses that accept a connection
+p2p_dial_back_timeout_ms = 1500
+
+# Federated validation (ADR-0014): share of accepted results re-verified by a second operator. No
+# audit is opened while a single operator validates. Changeable at runtime without a restart:
+#   gg admin audit-rate --set 0.5 --reason "..."
+audit_rate = 0.25
+# Share of the results a GPU validator decided that a CPU validator recomputes again (ADR-0031).
+engine_check_rate = 0.1
+# Memory for the optimizer state kept between rounds (ADR-0036): 4 GiB holds SmolLM2-135M's weights
+# and Adam moments (1.6 GB) twice over. A run that does not fit is stepped from disk. 0 disables it.
+step_cache_bytes = 4294967296
+# Retention of training runs' intermediate artifacts (ADR-0040). Once a round is settled (every task
+# decided, no verification or dispute open) and this delay has passed, its workers' outputs, the
+# micro-batch rows and the superseded optimizer moments are removed, and so are the weights of the
+# checkpoints not kept. Kept: step 0, every checkpoint_keep_every steps, the current checkpoint and
+# everything researchers uploaded. SmolLM2 leaves about 2 GB per round without it.
+retention = true
+retention_after_secs = 3600
+checkpoint_keep_every = 50
+retention_interval_secs = 300
+
+# Data rule published by GET /v1/info and accepted explicitly when a project is created
+# (gg admin project-create --ack-data-policy). "research-any-data": any research data is accepted,
+# with the plain caution that the machine computing a task sees its data (docs/DECISIONS.md, D4).
+data_policy = "research-any-data"
+
+# Contributors sign up on the portal (/portal/contribute) with an e-mail code, without admission, and
+# their machines attach themselves with the account's enrollment code (ADR-0030). Needs
+# [email_login] below to be enabled; the server refuses to start otherwise.
+contributor_signup = false                 # true once the mail relay works
+
+[email_login]
+# Sign-in by a single-use link sent to the researcher's address (ADR-0028); admission stays manual
+# (gg admin researcher-list, then gg admin researcher-admission). Needs an outgoing mail relay: the
+# institution's, or a sending service. Until one is configured, leave "disabled": the operator then
+# creates researchers and hands them their API token (gg admin researcher-create).
+# Relay: Brevo. On the server, not in this repository: the SMTP login (Brevo, "SMTP & API" page)
+# as smtp_username, and the SMTP key in /etc/gpu-goblin/server.env as GG_SMTP_PASSWORD=... (0600).
+# Switch provider to "smtp" once noreply@gpugoblin.com is authenticated in Brevo (DKIM, DMARC).
+provider = "disabled"                      # "smtp" once the relay below is filled in
+smtp_host = "smtp-relay.brevo.com"
+smtp_port = 587
+smtp_tls = "starttls"
+smtp_username = ""                         # the Brevo SMTP login, set on the server
+smtp_password_env = "GG_SMTP_PASSWORD"     # put GG_SMTP_PASSWORD=... in /etc/gpu-goblin/server.env (0600)
+from = "GPU Goblin <noreply@gpugoblin.com>"
+allowed_domains = []                       # e.g. ["univ-example.fr", "cnrs.fr"]; empty = any address
+link_ttl_secs = 900
+max_links_per_hour = 5
+session_ttl_secs = 43200
+
+[orcid]
+# ORCID sign-in, once client credentials exist (ADR-0010). "simulated" is refused when public = true.
+provider = "disabled"
+client_id = ""
+client_secret_env = "GG_ORCID_CLIENT_SECRET"   # the secret is read from the environment, never here
+redirect_uri = "https://grid.gpugoblin.com/portal/callback"
+session_ttl_secs = 43200
+state_ttl_secs = 600

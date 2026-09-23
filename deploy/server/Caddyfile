@@ -1,0 +1,48 @@
+# Caddy in front of gg-server: automatic HTTPS (Let's Encrypt), reverse proxy to 127.0.0.1:8080.
+# Install as /etc/caddy/Caddyfile. The host name comes from /etc/gpu-goblin/domain.env (GG_DOMAIN),
+# loaded into Caddy by deploy/server/caddy-gpu-goblin.conf: that file is the one place to change the
+# domain on the server (docs/DEPLOY.md, "Domain").
+{
+	# ACME account contact (certificate expiry notices). Replace before the first start.
+	email {$GG_ACME_EMAIL}
+}
+
+{$GG_DOMAIN} {
+	# Bodies: gg-server accepts max_upload_bytes + 1 KiB on upload routes (1 GiB + 1024 with
+	# deploy/server/server.toml) and max_json_bytes (1 MiB) elsewhere. The proxy limit sits just above
+	# the larger one, so that oversize uploads are refused by the server with its own message. Raise
+	# both together.
+	request_body {
+		max_size 1025MiB
+	}
+
+	# Signed releases for contributors (install.sh downloads from here). Plain static files: their
+	# authenticity comes from SHA256SUMS.sshsig, not from this server.
+	handle_path /releases/* {
+		root * /srv/gpu-goblin/releases
+		file_server
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8080 {
+			# Stream responses as they come (artifact downloads, long-poll claims).
+			flush_interval -1
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/gpu-goblin-access.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+	}
+}
+
+# Plain HTTP on port 80 only serves the ACME challenge and redirects to HTTPS (Caddy's default).

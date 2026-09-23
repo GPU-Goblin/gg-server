@@ -1,0 +1,11 @@
+# Runs gg-backup.service every day at 03:15 (plus up to 15 minutes), and at boot if a run was missed.
+[Unit]
+Description=Daily GPU Goblin backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

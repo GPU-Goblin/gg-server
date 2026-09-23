@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The repository exposes no secret: everything runs against a local PostgreSQL service.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: fmt, clippy, tests, contract
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: gg
+          POSTGRES_PASSWORD: gg_ci_password
+          POSTGRES_DB: gpu_goblin
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gg" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgres://gg:gg_ci_password@127.0.0.1:5434/gpu_goblin
+      GG_NETWORK_ID: gg-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup show   # rust-toolchain.toml pins the version
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: PostgreSQL 17 client (the backup and restore test needs pg_dump of the server's version)
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+      # fmt, clippy -D warnings, tests against the PostgreSQL service, then the CosmWasm contract
+      # (its own workspace): lints, tests on a simulated chain, Wasm artifact and entry points.
+      - run: cargo xtask check
+
+  demo:
+    name: reference scenario (graph, with faults)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: gg-server
+      - uses: actions/checkout@v4
+        with:
+          repository: GPU-Goblin/gg-worker
+          path: gg-worker
+      - name: Toolchain
+        working-directory: gg-server
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            gg-server
+            gg-worker
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: End-to-end demo
+        working-directory: gg-server
+        run: cargo xtask demo --kind graph --faults
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demo-report
+          path: gg-server/var/demo/**/report.json
+          if-no-files-found: warn

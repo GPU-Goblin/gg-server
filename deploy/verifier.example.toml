@@ -1,0 +1,13 @@
+# gg-verifier configuration (administered validator).
+server_url = "http://127.0.0.1:8080"
+key_path = "./var/verifier/verifier.key"  # authorize with: gg admin validator-add --key <pubkey>
+work_dir = "./var/verifier/work"
+claim_wait_secs = 20
+max_download_bytes = 2147483648
+cache_max_bytes = 4294967296            # local input cache (re-hashed on every hit), 0 disables
+prefetch = true                         # download inputs of tasks being computed, while the worker computes (ADR-0037)
+
+public = false                          # refuses to start with dev_faults enabled
+
+[dev_faults]                            # demonstration only, never remotely activatable
+always_accept = false                   # accept without recomputing (used to exercise disputes)

@@ -1,0 +1,70 @@
+# gg-server configuration. Environment variables GG_* (and DATABASE_URL) override these values.
+database_url = "postgres://gg:gg_dev_password@127.0.0.1:5434/gpu_goblin"
+bind_addr = "127.0.0.1:8080"
+data_dir = "./var/server"          # objects/ and server.key (0600)
+network_id = "gg-dev-local"        # bound into every signature and hash
+pool_size = 16
+lease_secs = 120                   # initial attempt lease, renewed by heartbeats
+lease_max_secs = 3600              # hard bound of a lease
+verification_lease_secs = 600
+claim_wait_max_secs = 30           # long-poll bound
+max_upload_bytes = 1073741824
+max_json_bytes = 1048576
+session_ttl_secs = 900
+challenge_ttl_secs = 120
+reaper_interval_secs = 5
+dev_mode = false                   # simulated providers etc.; refused when public = true
+public = false
+public_url = "http://127.0.0.1:8080"   # address behind the HTTPS proxy (https when public); used in links
+min_worker_version = ""            # oldest gg-worker given tasks (x.y.z); older ones stop and ask to be updated
+project_initial_grant = 0          # credits given to every new project; large for a deployment that does not bill
+quota_requests_per_minute = 600    # sustained per actor (token, session or client IP)
+quota_burst = 120
+quota_compute_multiplier = 10       # worker/validator sessions: 10 × the base quota (artifact downloads)
+
+# Peer-assisted artifact distribution (ADR-0012). The control plane keeps the durable copy, signs the
+# chunk manifests and the read tickets, and keeps a bounded registry of who announced holding what.
+p2p_enabled = true
+p2p_chunk_bytes = 1048576           # transport granularity (manifest + verification)
+p2p_peer_ttl_secs = 300             # an announcement expires unless refreshed
+p2p_ticket_ttl_secs = 300
+p2p_max_peers = 8                   # peers returned per artifact
+p2p_allow_private_addrs = false     # loopback/private announced addresses; refused when public = true
+# Federated validation (ADR-0014): share of submissions re-verified by a different operator. The draw
+# uses a server-side secret and happens after the result is recorded. No audit while a single operator
+# can validate.
+audit_rate = 0.25                   # can be changed at runtime: POST /v1/admin/config/audit-rate (D2)
+engine_check_rate = 0.1             # share of GPU-validated results recomputed again on the CPU (ADR-0031)
+step_cache_bytes = 4294967296       # optimizer state kept in memory between rounds (ADR-0036); 0 disables
+retention = true                    # remove settled rounds' intermediate artifacts (ADR-0040)
+retention_after_secs = 3600         # after a round closes
+checkpoint_keep_every = 50          # weights kept every N steps (with step 0 and the current one)
+retention_interval_secs = 300
+data_policy = "public-synthetic-only"  # or "research-any-data"; published by /v1/info, accepted when a project is created (D4)
+
+p2p_dial_back = true                # check an announced address accepts a connection before advertising it
+p2p_dial_back_timeout_ms = 1500
+
+[email_login]
+# Sign-in by a single-use link sent to a researcher's address (ADR-0028). Admission stays manual.
+# "disabled" (default), "smtp", or "simulated" (dev_mode only, refused when public).
+provider = "disabled"
+smtp_host = ""                      # the institution's relay or a sending service
+smtp_port = 587
+smtp_tls = "starttls"               # "starttls", "tls" (port 465), or "none" to a relay on localhost only
+smtp_username = ""
+smtp_password_env = "GG_SMTP_PASSWORD"   # password read from the environment, never from this file
+from = "GPU Goblin <noreply@gpugoblin.com>"
+allowed_domains = []                # e.g. ["univ-paris.fr", "cnrs.fr"]; subdomains accepted; empty = any
+link_ttl_secs = 900
+max_links_per_hour = 5
+session_ttl_secs = 43200
+
+[orcid]
+# "disabled" (default), "simulated" (dev_mode only, refused when public), "sandbox" or "production".
+provider = "disabled"
+client_id = ""
+client_secret_env = "GG_ORCID_CLIENT_SECRET"   # secret read from the environment, never from this file
+redirect_uri = "http://127.0.0.1:8080/portal/callback"  # must be https outside dev_mode
+session_ttl_secs = 43200
+state_ttl_secs = 600

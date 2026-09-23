@@ -1,0 +1,4 @@
+# The CosmWasm VM provides the host functions (`db_read`, `addr_validate`, `abort`, …) at run time.
+# The linker must therefore accept them as imports instead of refusing them as undefined symbols.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined", "-C", "link-arg=-s"]

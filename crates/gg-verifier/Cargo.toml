@@ -1,0 +1,34 @@
+[package]
+name = "gg-verifier"
+description = "GPU Goblin administered validator: recomputes references and signs decisions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gg-verifier"
+path = "src/bin/gg-verifier.rs"
+
+[features]
+# Recompute model tasks on a Vulkan GPU (ADR-0031): `engine = "gpu"` in the configuration.
+gpu = ["gg-compute/gpu"]
+# Recompute model tasks on the native CUDA engine (ADR-0033): `engine = "cuda"`.
+cuda = ["gg-compute/cuda"]
+
+[dependencies]
+gg-core = { workspace = true }
+gg-protocol = { workspace = true }
+gg-compute = { workspace = true }
+gg-client = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

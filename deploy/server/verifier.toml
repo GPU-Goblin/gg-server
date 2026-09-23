@@ -1,0 +1,22 @@
+# Production configuration of the operator's first validator, on the server machine.
+# Install as /etc/gpu-goblin/verifier.toml (owner root, group gg-verifier, mode 0640).
+# Its key is created by `gg-verifier init` and authorized with `gg admin validator-add` (docs/DEPLOY.md).
+
+# Loopback, plain http: allowed because the traffic never leaves the machine. A validator on another
+# machine uses https://grid.gpugoblin.com.
+server_url = "http://127.0.0.1:8080"
+key_path = "/var/lib/gg-verifier/verifier.key"   # 0600, owned by gg-verifier; back it up offline
+work_dir = "/var/lib/gg-verifier/work"
+claim_wait_secs = 20
+max_download_bytes = 2147483648
+cache_max_bytes = 4294967296     # input cache, re-hashed on every hit; 0 disables
+
+# The dedicated server has no GPU: this validator recomputes on the CPU. Next to GPU validators
+# (another machine, `engine = "gpu"`, a build with `--features gpu`), it is best kept for the engine
+# checks the server draws from what they decide, and for audits (ADR-0031):
+engine = "cpu"
+secondary_only = false           # true once a GPU validator takes the primary verifications: audits and engine checks only
+prefetch = true                  # download the inputs of tasks being computed while the worker computes (ADR-0037)
+
+# Refuses to start with any dev_faults entry enabled.
+public = true

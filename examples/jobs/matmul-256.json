@@ -1,0 +1,22 @@
+{
+  "_comment": "Body of POST /v1/researcher/projects/{id}/jobs for one tensor.matmul.v1 task. Input hashes/sizes must reference artifacts uploaded to the project (see `gg job submit`, which builds this automatically). reward_schedule must equal the catalog price (2*m*k*n flop → 1 TC per 1e9 flop, min 1).",
+  "name": "matmul-256",
+  "priority": 0,
+  "dry_run": false,
+  "tasks": [
+    {
+      "catalog_version": 1,
+      "params": { "kind": "tensor.matmul.v1", "m": 256, "k": 256, "n": 256 },
+      "inputs": {
+        "a": { "hash": "<sha256 hex of a.ggt>", "size": 262166 },
+        "b": { "hash": "<sha256 hex of b.ggt>", "size": 262166 }
+      },
+      "numeric_profile": "f32-v1",
+      "seed_strategy": { "strategy": "none" },
+      "resource_limits": { "max_ram_bytes": 268435456, "max_disk_bytes": 67108864, "max_duration_secs": 600, "max_output_bytes": 262166 },
+      "validation_policy": { "method": "recompute-reference", "method_version": 1, "reference_profile": "cpu-f32-flex-v1", "tolerance": { "abs": 0.0001, "rel": 0.0001 } },
+      "reward_schedule": { "primary": "1", "replica": "1", "audit": "1", "verification_cost": "1" },
+      "max_attempts": 3
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+[package]
+name = "gg-storage"
+description = "GPU Goblin persistence: PostgreSQL (SQLx, embedded migrations) and content-addressed object store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Ephemeral test databases (used by integration tests of this and dependent crates).
+testing = []
+
+[dependencies]
+gg-core = { workspace = true }
+gg-protocol = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

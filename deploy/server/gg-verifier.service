@@ -1,0 +1,69 @@
+# GPU Goblin validator, run by the operator on the server machine (first validator of the beta).
+# Install as /etc/systemd/system/gg-verifier.service (docs/DEPLOY.md). It runs as its own user and
+# cannot read the server's key or data: it talks to the control plane over 127.0.0.1 like any
+# validator would over the network.
+[Unit]
+Description=GPU Goblin validator (gg-verifier)
+Documentation=https://github.com/GPU-Goblin/gg-server/blob/main/docs/DEPLOY.md
+After=network-online.target gg-server.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+User=gg-verifier
+Group=gg-verifier
+ExecStart=/usr/local/bin/gg-verifier --config /etc/gpu-goblin/verifier.toml run
+TimeoutStopSec=60
+Restart=on-failure
+# The validator is refused until its key is authorized (gg admin validator-add): retry slowly.
+RestartSec=30s
+
+Environment=RUST_LOG=info
+# Strict float32 for a validator with engine = "cuda" (ADR-0033); without effect on the CPU.
+Environment=NVIDIA_TF32_OVERRIDE=0
+EnvironmentFile=-/etc/gpu-goblin/verifier.env
+
+# /var/lib/gg-verifier: verifier.key (0600) and work/ (bundles, input cache).
+StateDirectory=gg-verifier
+StateDirectoryMode=0700
+UMask=0077
+# Recomputing a large task takes memory; keep the control plane alive whatever happens here.
+# Adjust to the machine (for example 60% of RAM).
+MemoryMax=16G
+# The control plane first: under pressure, the kernel kills the validator, not the server.
+OOMScoreAdjust=500
+Nice=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

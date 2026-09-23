@@ -1,0 +1,19 @@
+[package]
+name = "gg-ledger"
+description = "GPU Goblin budgets and double-entry ledger: reservations, commits, releases and idempotent rewards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gg-core = { workspace = true }
+gg-storage = { path = "../gg-storage" }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+gg-storage = { path = "../gg-storage", features = ["testing"] }
+tokio = { workspace = true }

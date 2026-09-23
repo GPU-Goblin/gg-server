@@ -1,0 +1,17 @@
+# Development dependencies only (no privileged service). `cargo xtask db up` performs the same
+# with plain `docker run` when the compose plugin is unavailable.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: gpu-goblin-postgres
+    environment:
+      POSTGRES_USER: gg
+      POSTGRES_PASSWORD: gg_dev_password
+      POSTGRES_DB: gpu_goblin
+    ports:
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gg"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

@@ -1,0 +1,104 @@
+{
+  "leaves": [
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-2",
+      "beneficiary": "rg1bob",
+      "asset": "utrg",
+      "amount": 7,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-1",
+      "beneficiary": "rg1alice",
+      "asset": "utrg",
+      "amount": 10,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-4",
+      "beneficiary": "rg1dan",
+      "asset": "utrg",
+      "amount": 1,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-3",
+      "beneficiary": "rg1carol",
+      "asset": "utrg",
+      "amount": 5,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "order": [
+    "reward-1",
+    "reward-2",
+    "reward-3",
+    "reward-4"
+  ],
+  "leaf_hashes": [
+    "a68d4114db6c74956cb5a2417c598bdf996c9787b5d3fd5fd96096235042ac16",
+    "4e6e53ca138888ff88b1e51a6db390bacdf3fdae98778d5dac7d6ebb62d064ca",
+    "f0b227badefd97facbf2d77e730fc497775d70d3c95ea3708bb41b023ce745dd",
+    "26ebf10991561e068519348818ef45051e4544430a97a4f36e409b177f482b81"
+  ],
+  "root": "5f5e1007e88f91c6f009bb109a66d7e3ae814781779559a4823d5ab6a6c840f2",
+  "total_amount": "23",
+  "proofs": [
+    [
+      {
+        "hash": "4e6e53ca138888ff88b1e51a6db390bacdf3fdae98778d5dac7d6ebb62d064ca",
+        "side": "right"
+      },
+      {
+        "hash": "30726a6245e317dc0121a916e5f525f4aa1a40a44ff62ec15448d13b897a335f",
+        "side": "right"
+      }
+    ],
+    [
+      {
+        "hash": "a68d4114db6c74956cb5a2417c598bdf996c9787b5d3fd5fd96096235042ac16",
+        "side": "left"
+      },
+      {
+        "hash": "30726a6245e317dc0121a916e5f525f4aa1a40a44ff62ec15448d13b897a335f",
+        "side": "right"
+      }
+    ],
+    [
+      {
+        "hash": "26ebf10991561e068519348818ef45051e4544430a97a4f36e409b177f482b81",
+        "side": "right"
+      },
+      {
+        "hash": "87bd7c48dce21aa3a42350977b61a952d403b5a676dff34577539b7800503629",
+        "side": "left"
+      }
+    ],
+    [
+      {
+        "hash": "f0b227badefd97facbf2d77e730fc497775d70d3c95ea3708bb41b023ce745dd",
+        "side": "left"
+      },
+      {
+        "hash": "87bd7c48dce21aa3a42350977b61a952d403b5a676dff34577539b7800503629",
+        "side": "left"
+      }
+    ]
+  ]
+}

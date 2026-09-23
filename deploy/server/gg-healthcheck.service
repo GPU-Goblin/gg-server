@@ -1,0 +1,29 @@
+# GPU Goblin health check (deploy/server/gg-healthcheck.sh). Problems appear with
+#   journalctl -u gg-healthcheck -p err
+[Unit]
+Description=GPU Goblin health check
+After=gg-server.service
+
+[Service]
+Type=oneshot
+User=gg
+Group=gg
+EnvironmentFile=/etc/gpu-goblin/monitor.env
+ExecStart=/usr/local/lib/gpu-goblin/gg-healthcheck.sh
+StateDirectory=gg-healthcheck
+# The script exits 1 when it raised an alert; that is its normal way of reporting, not a crash.
+SuccessExitStatus=1
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native

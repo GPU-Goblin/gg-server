@@ -1,0 +1,77 @@
+{
+  "leaves": [
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-1",
+      "beneficiary": "rg1alice",
+      "asset": "utrg",
+      "amount": 10,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-2",
+      "beneficiary": "rg1bob",
+      "asset": "utrg",
+      "amount": 7,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-3",
+      "beneficiary": "rg1carol",
+      "asset": "utrg",
+      "amount": 5,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "order": [
+    "reward-1",
+    "reward-2",
+    "reward-3"
+  ],
+  "leaf_hashes": [
+    "a68d4114db6c74956cb5a2417c598bdf996c9787b5d3fd5fd96096235042ac16",
+    "4e6e53ca138888ff88b1e51a6db390bacdf3fdae98778d5dac7d6ebb62d064ca",
+    "f0b227badefd97facbf2d77e730fc497775d70d3c95ea3708bb41b023ce745dd"
+  ],
+  "root": "b5518d6de17305f1c2c74d922f876bd7f03e6835694400d221b77412e9a63398",
+  "total_amount": "22",
+  "proofs": [
+    [
+      {
+        "hash": "4e6e53ca138888ff88b1e51a6db390bacdf3fdae98778d5dac7d6ebb62d064ca",
+        "side": "right"
+      },
+      {
+        "hash": "f0b227badefd97facbf2d77e730fc497775d70d3c95ea3708bb41b023ce745dd",
+        "side": "right"
+      }
+    ],
+    [
+      {
+        "hash": "a68d4114db6c74956cb5a2417c598bdf996c9787b5d3fd5fd96096235042ac16",
+        "side": "left"
+      },
+      {
+        "hash": "f0b227badefd97facbf2d77e730fc497775d70d3c95ea3708bb41b023ce745dd",
+        "side": "right"
+      }
+    ],
+    [
+      {
+        "hash": "87bd7c48dce21aa3a42350977b61a952d403b5a676dff34577539b7800503629",
+        "side": "left"
+      }
+    ]
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "leaves": [
+    {
+      "network": "gg-test-vectors",
+      "chain_id": "gg-localnet-1",
+      "contract": "rg1contractexampleaddress000000000000000",
+      "batch_id": "batch-0001",
+      "reward_id": "reward-1",
+      "beneficiary": "rg1alice",
+      "asset": "utrg",
+      "amount": 10,
+      "receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "order": [
+    "reward-1"
+  ],
+  "leaf_hashes": [
+    "a68d4114db6c74956cb5a2417c598bdf996c9787b5d3fd5fd96096235042ac16"
+  ],
+  "root": "a68d4114db6c74956cb5a2417c598bdf996c9787b5d3fd5fd96096235042ac16",
+  "total_amount": "10",
+  "proofs": [
+    []
+  ]
+}

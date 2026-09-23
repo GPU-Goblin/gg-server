@@ -1,0 +1,110 @@
+name: Release (unsigned draft)
+
+# On a tag vX.Y.Z, build every distributed executable for Linux x86_64 and publish them as a DRAFT
+# GitHub release with an UNSIGNED manifest. Nothing here can sign: the release key lives on a USB
+# stick used only on an offline computer (docs/RELEASE.md). The owner downloads
+# release.unsigned.json, signs it offline with `gg release sign`, attaches release.json, SHA256SUMS
+# and SHA256SUMS.sshsig to the draft, and only then publishes it.
+#
+# This repository publishes the whole release, the contributor's binaries included, because the
+# release tooling (cargo xtask release) lives here and one manifest per version means one offline
+# signature per version. The worker is built from GPU-Goblin/gg-worker at the SAME tag: tag both
+# repositories with the same version before pushing the tag here.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the draft release; no other secret is used
+
+env:
+  CARGO_TERM_COLOR: always
+  # Network the release targets (bound into the manifest, checked by install.sh and gg release verify).
+  # Set the repository variable GG_RELEASE_NETWORK to override.
+  GG_RELEASE_NETWORK: ${{ vars.GG_RELEASE_NETWORK || 'gg-beta-1' }}
+  # Distributed binaries without debug info (about 17 MB instead of 147 MB for gg-worker); symbols
+  # are kept, so backtraces still name functions.
+  CARGO_PROFILE_RELEASE_STRIP: debuginfo
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build and draft ${{ github.ref_name }}
+    # Built on Ubuntu 22.04 (glibc 2.35) so that the binaries also run on Debian 12 (glibc 2.36) and
+    # Ubuntu 24.04. A newer runner would produce binaries that refuse to start on Debian 12.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: gg-server
+      - name: gg-worker at the same tag
+        uses: actions/checkout@v4
+        with:
+          repository: GPU-Goblin/gg-worker
+          ref: ${{ github.ref_name }}
+          path: gg-worker
+
+      - name: Toolchain (pinned by rust-toolchain.toml)
+        run: |
+          (cd gg-server && rustup show)
+          (cd gg-worker && rustup show)
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            gg-server
+            gg-worker
+          key: release
+
+      - name: Version matches the tag
+        working-directory: gg-server
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gg-cli") | .version')"
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but workspace version $version"; exit 1; }
+
+      # gg, gg-server, gg-verifier from here; gg-worker and gg-executor (CPU) from ../gg-worker
+      # (GG_WORKER_DIR); then the unsigned manifest of exactly those bytes.
+      - name: Build and write the unsigned manifest
+        working-directory: gg-server
+        env:
+          GG_WORKER_DIR: ${{ github.workspace }}/gg-worker
+        run: cargo xtask release --network "$GG_RELEASE_NETWORK" --out "$GITHUB_WORKSPACE/dist" --notes "GPU Goblin $GITHUB_REF_NAME"
+
+      # The GPU build of the worker (WGPU/Vulkan). The runner has no GPU: it is compiled, not run.
+      # Its own target directory keeps it apart from the CPU build.
+      - name: GPU build of the worker
+        run: |
+          cargo build --manifest-path gg-worker/Cargo.toml --release --bins --features gg-worker/gpu \
+            --target-dir "$GITHUB_WORKSPACE/target-gpu"
+          cp target-gpu/release/gg-worker dist/gg-worker-gpu
+          cp target-gpu/release/gg-executor dist/gg-executor-gpu
+
+      # What install.sh downloads besides the binaries, so that it is covered by the same signature.
+      - name: Contributor kit
+        run: |
+          cp gg-worker/deploy/worker/install.sh gg-worker/deploy/worker/worker.toml.template \
+             gg-worker/deploy/worker/gg-worker.service dist/
+          dist/gg release add dist/release.unsigned.json \
+            gg-worker-gpu gg-executor-gpu install.sh worker.toml.template gg-worker.service
+          jq -r '.artifacts[] | "\(.sha256)  \(.name)"' dist/release.unsigned.json
+
+      - name: Draft release (unsigned)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          **Draft, not signed yet.** Do not install anything from this page before release.json,
+          SHA256SUMS and SHA256SUMS.sshsig are attached: install.sh refuses a release without them.
+
+          - network: \`$GG_RELEASE_NETWORK\`
+          - gg-server commit: \`$GITHUB_SHA\`
+          - gg-worker commit: \`$(git -C gg-worker rev-parse HEAD)\`
+
+          Signing (offline machine): docs/RELEASE.md.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "GPU Goblin $GITHUB_REF_NAME" --notes-file notes.md dist/*
