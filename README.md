@@ -25,10 +25,12 @@ trainer.load_checkpoint_into(model, run["run_id"])   # the trained weights come 
 Measured against a real server: loss from 1.098 to 0.021 in 25 rounds, every result verified by a
 validator. See [gg-python](https://github.com/GPU-Goblin/gg-python).
 
-**How long, with how many machines?** `gg job plan` answers before anything is submitted, on the
-real graph. For a 1.3-billion-parameter transformer and 100 million tokens, with 100 contributors
-on home fiber: 10.8 h today, 1.7 h with an optimized executor, versus 1.5 h on a datacenter card.
-See [docs/adr/0017-distribution-plan.md](docs/adr/0017-distribution-plan.md).
+**How long, with how many machines?** To estimate a computation's duration before submitting it,
+`gg job plan` uses the model's description and the planned number of contributors. For a
+1.3-billion-parameter transformer and 100 million tokens, the documented scenario estimates 10.8 h
+with 100 machines, 300 Mbit/s of upload and an executor at 300 GFLOP/s per machine. This figure is
+an estimate based on these assumptions, not a measured duration. Details and variants:
+[docs/adr/0017-distribution-plan.md](docs/adr/0017-distribution-plan.md).
 
 A model larger than any single machine is split into stages that run on different workers, and a
 matrix larger than any single machine is tiled. See
