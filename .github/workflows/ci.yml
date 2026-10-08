@@ -12,6 +12,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # File and line in backtraces without full debug information: the test binaries of the whole
+  # workspace otherwise fill the runner's disk.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   rust:
@@ -69,7 +72,15 @@ jobs:
           workspaces: |
             gg-server
             gg-worker
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Ubuntu 24.04 and later give unprivileged user namespaces only to programs whose AppArmor
+      # profile allows them: bwrap gets one (a contributor's machine needs the same), then must work.
+      - name: bubblewrap and its AppArmor profile (required by the sandbox tests)
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' \
+            | sudo tee /etc/apparmor.d/bwrap > /dev/null
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          bwrap --ro-bind / / --unshare-all true
       - name: End-to-end demo
         working-directory: gg-server
         run: cargo xtask demo --kind graph --faults
