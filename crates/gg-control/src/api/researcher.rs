@@ -955,7 +955,7 @@ pub async fn store_upload(
 }
 
 /// Parsed single byte range.
-fn parse_range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>, ApiError> {
+pub(crate) fn parse_range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>, ApiError> {
     let Some(h) = header else { return Ok(None) };
     let spec = h
         .strip_prefix("bytes=")

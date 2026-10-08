@@ -162,7 +162,13 @@ async fn upcoming_inputs(
             continue;
         }
         for r in decode_spec(&spec)?.definition.inputs.into_values() {
-            if !out.iter().any(|o| o.hash == r.hash) && state.objects().exists(&r.hash) {
+            // Durable: stored by the server, or held by a lab node and read through peers.
+            if !out.iter().any(|o| o.hash == r.hash)
+                && (state.objects().exists(&r.hash)
+                    || gg_storage::queries::artifacts::held_by_node(&mut c, &r.hash)
+                        .await?
+                        .is_some())
+            {
                 out.push(r);
             }
         }
@@ -230,6 +236,28 @@ async fn download(
     if !validator_may_read(&state, v.id, &hash).await? {
         return Err(ApiError::NotFound("artifact".into()));
     }
+    if !state.objects().exists(&hash) {
+        let mut c = state.db().pool().acquire().await?;
+        if gg_storage::queries::artifacts::held_by_node(&mut c, &hash)
+            .await?
+            .is_some()
+        {
+            drop(c);
+            let range = headers
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_owned());
+            if let Some((node, size)) = crate::workflows::relay::relayable(&state, &hash).await? {
+                return crate::workflows::relay::stream(&state, node, hash, size, range.as_deref())
+                    .await
+                    .map(lease_covered);
+            }
+            // Held by the scientist's lab node (ADR-0041): read through peers.
+            return Err(ApiError::Conflict(
+                "artifact held by a lab node: fetch it from peers".into(),
+            ));
+        }
+    }
     let range = headers
         .get("range")
         .and_then(|v| v.to_str().ok())
@@ -238,6 +266,56 @@ async fn download(
     stream_object_ranged(&state, &hash, range.as_deref())
         .await
         .map(lease_covered)
+}
+
+/// Signed chunk manifest of an artifact this validator may read (ADR-0041, A5): what a lab node or
+/// a worker holds is read through peers, each chunk checked against it.
+#[utoipa::path(get, path = "/validator/artifacts/{hash}/manifest", tag = "validator", responses((status = 200, body = Object)))]
+async fn artifact_manifest(
+    State(state): State<AppState>,
+    v: Validator,
+    Path(hash): Path<Sha256Digest>,
+) -> Result<Response, ApiError> {
+    if !state.config().p2p_enabled || !validator_may_read(&state, v.id, &hash).await? {
+        return Err(ApiError::NotFound("artifact".into()));
+    }
+    let manifest = crate::workflows::p2p::manifest(&state, &hash).await?;
+    Ok(lease_covered(Json(
+        serde_json::json!({ "manifest": manifest }),
+    )))
+}
+
+/// Holders of an artifact this validator may read, and a ticket for it.
+#[utoipa::path(get, path = "/validator/artifacts/{hash}/peers", tag = "validator", responses((status = 200, body = crate::workflows::p2p::PeersResponse)))]
+async fn artifact_peers(
+    State(state): State<AppState>,
+    v: Validator,
+    Path(hash): Path<Sha256Digest>,
+) -> Result<Response, ApiError> {
+    if !state.config().p2p_enabled || !validator_may_read(&state, v.id, &hash).await? {
+        return Err(ApiError::NotFound("artifact".into()));
+    }
+    Ok(lease_covered(Json(
+        crate::workflows::p2p::peers(&state, v.id.into(), &v.key, None, &hash).await?,
+    )))
+}
+
+/// Ask the holders of an artifact this validator may read, and cannot reach, to push it to this
+/// validator's chunk server at `addr` (ADR-0041, A8).
+#[utoipa::path(post, path = "/validator/artifacts/{hash}/reverse", tag = "validator", request_body = crate::api::worker::AnnounceRequest, responses((status = 200, body = Object)))]
+async fn artifact_reverse(
+    State(state): State<AppState>,
+    v: Validator,
+    Path(hash): Path<Sha256Digest>,
+    Json(req): Json<crate::api::worker::AnnounceRequest>,
+) -> Result<Response, ApiError> {
+    if !validator_may_read(&state, v.id, &hash).await? {
+        return Err(ApiError::NotFound("artifact".into()));
+    }
+    let asked = crate::workflows::push::ask(&state, &hash, &req.addr, &req.tls_fingerprint).await?;
+    Ok(lease_covered(Json(
+        serde_json::json!({ "holders_asked": asked }),
+    )))
 }
 
 /// JSON routes.
@@ -249,6 +327,9 @@ pub fn json_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(decision))
         .routes(routes!(release))
         .routes(routes!(upcoming))
+        .routes(routes!(artifact_manifest))
+        .routes(routes!(artifact_peers))
+        .routes(routes!(artifact_reverse))
 }
 
 /// Streaming routes.

@@ -166,10 +166,10 @@ impl Env {
     }
 
     async fn login(&self, key: &SecretKey, action: &str) -> String {
-        let path = if action == "worker-login" {
-            "/worker"
-        } else {
-            "/validator"
+        let path = match action {
+            "worker-login" => "/worker",
+            "node-login" => "/node",
+            _ => "/validator",
         };
         let (s, ch) = self
             .post(
@@ -1529,6 +1529,94 @@ async fn a_validator_may_prefetch_the_inputs_of_tasks_being_computed() {
     assert!(upcoming(cpu).await.is_empty());
     let (s, _) = env
         .get_bytes(&v.token, &format!("/validator/artifacts/{}", a.hash))
+        .await;
+    assert_eq!(s, 404);
+}
+
+/// ADR-0041, A2: a researcher registers its lab node's key; the node signs in by challenge and knows
+/// for whom it works; another key, a duplicate, a pending researcher and a revoked node are refused.
+#[tokio::test]
+async fn a_researcher_registers_a_lab_node_that_signs_in_and_can_be_revoked() {
+    let env = start(120, 5).await;
+    let r = setup_researcher(&env, 10).await;
+    let key = SecretKey::generate().unwrap();
+    // Unknown key: no challenge.
+    let (s, _) = env
+        .post(
+            "",
+            "/node/challenge",
+            json!({ "public_key": key.public_key().to_hex() }),
+        )
+        .await;
+    assert_eq!(s, 404);
+    let (s, n) = env
+        .post(
+            &r.token,
+            "/researcher/nodes",
+            json!({ "public_key": key.public_key().to_hex(), "name": "lab-box" }),
+        )
+        .await;
+    assert_eq!(s, 200, "{n}");
+    let node_id = n["node_id"].as_str().unwrap().to_owned();
+    // The same key twice: refused.
+    let (s, _) = env
+        .post(
+            &r.token,
+            "/researcher/nodes",
+            json!({ "public_key": key.public_key().to_hex() }),
+        )
+        .await;
+    assert_eq!(s, 409);
+    // A pending researcher cannot register one.
+    let (s, pending) = env
+        .post(
+            &env.admin,
+            "/admin/researchers",
+            json!({ "display_name": "Pending" }),
+        )
+        .await;
+    assert_eq!(s, 200, "{pending}");
+    let other = SecretKey::generate().unwrap();
+    let (s, _) = env
+        .post(
+            pending["token"].as_str().unwrap(),
+            "/researcher/nodes",
+            json!({ "public_key": other.public_key().to_hex() }),
+        )
+        .await;
+    assert_eq!(s, 403);
+    // The node signs in and knows for whom it works.
+    let token = env.login(&key, "node-login").await;
+    let (s, me) = env.get(&token, "/node/me").await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["node_id"], node_id);
+    assert_eq!(me["researcher_id"], r.id.to_string());
+    // A node session is no worker or researcher session.
+    let (s, _) = env.get(&token, "/researcher/nodes").await;
+    assert_eq!(s, 403);
+    let (s, list) = env.get(&r.token, "/researcher/nodes").await;
+    assert_eq!(s, 200);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["name"], "lab-box");
+    assert!(list[0]["last_seen_at"].is_string());
+    // Revoked: the session ends at once, and no new challenge.
+    let (s, v) = env
+        .post(
+            &r.token,
+            &format!("/researcher/nodes/{node_id}/revoke"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["revoked"], true);
+    let (s, _) = env.get(&token, "/node/me").await;
+    assert_eq!(s, 401);
+    let (s, _) = env
+        .post(
+            "",
+            "/node/challenge",
+            json!({ "public_key": key.public_key().to_hex() }),
+        )
         .await;
     assert_eq!(s, 404);
 }

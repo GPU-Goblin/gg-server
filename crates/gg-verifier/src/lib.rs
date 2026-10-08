@@ -47,6 +47,16 @@ pub struct VerifierConfig {
     /// into the cache (ADR-0037): a round's checkpoint is then already here when the submission
     /// arrives, instead of being fetched on the critical path.
     pub prefetch: bool,
+    /// Accept loopback and private addresses for the peers an artifact is read from (a laboratory
+    /// network, single-host demonstrations). What a lab node holds is read through peers
+    /// (ADR-0041); the control plane has no copy of it.
+    pub allow_private_peers: bool,
+    /// Listen here (`ip:port`) for artifacts pushed by holders that cannot be reached, such as a
+    /// lab node behind a NAT (ADR-0041, A8). Empty (the default): no listening socket, and such
+    /// artifacts cannot be verified here. `push_advertise`: the address to give instead of the ones
+    /// found (IPv6, gateway mapping, bound, observed).
+    pub push_listen: String,
+    pub push_advertise: String,
     /// Public deployment flag: refuses to start with development faults enabled.
     pub public: bool,
     /// Controlled fault injection for demonstrations (never remotely activatable).
@@ -81,6 +91,9 @@ impl Default for VerifierConfig {
             engine: "cpu".into(),
             secondary_only: false,
             prefetch: true,
+            allow_private_peers: false,
+            push_listen: String::new(),
+            push_advertise: String::new(),
             public: false,
             dev_faults: VerifierFaults::default(),
         }
@@ -109,6 +122,9 @@ impl VerifierConfig {
         }
         if let Some(v) = env("GG_VERIFIER_ENGINE") {
             cfg.engine = v;
+        }
+        if let Some(v) = env("GG_VERIFIER_ALLOW_PRIVATE_PEERS") {
+            cfg.allow_private_peers = v == "1" || v == "true";
         }
         let engine = cfg.engine()?;
         match engine {
@@ -176,8 +192,10 @@ pub struct Verifier {
     cfg: VerifierConfig,
     engine: gg_compute::engine::EngineSelection,
     api: Api,
-    key: SecretKey,
+    key: std::sync::Arc<SecretKey>,
     info: ServerInfo,
+    /// Downloads, from the control plane or, for what it does not store, from peers.
+    reader: Reader,
     validator_id: Option<ValidatorId>,
     token: Option<(String, Instant)>,
     cache: gg_client::cache::ArtifactCache,
@@ -210,6 +228,140 @@ impl FetchLocks {
     }
 }
 
+/// Reads an artifact from the control plane, or through peers when it has no copy (`409`: an
+/// artifact a lab node holds, ADR-0041). Peer chunks are checked against the manifest the server
+/// signs, and the whole against its hash, exactly as a worker does.
+/// Why a read failed: the control plane's copy, or the peers holding the only one. A worker is
+/// never judged on the second (the holder may simply be offline): the verification is released
+/// and tried again.
+#[derive(Debug)]
+enum ReadError {
+    Server(ClientError),
+    Peers(ClientError),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Server(e) => write!(f, "{e}"),
+            Self::Peers(e) => write!(f, "through peers: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+#[derive(Clone)]
+struct Reader {
+    api: Api,
+    key: std::sync::Arc<SecretKey>,
+    network: gg_core::NetworkId,
+    server_key: gg_protocol::keys::PublicKey,
+    max: u64,
+    peers: bool,
+    allow_private_peers: bool,
+    /// Where holders push what nobody can fetch from them (A8), when configured.
+    push: Option<std::sync::Arc<(gg_client::p2p::PeerServer, gg_client::reach::Reach)>>,
+}
+
+impl Reader {
+    async fn nobody_reachable_holds(
+        &self,
+        token: &str,
+        r: &gg_protocol::messages::ArtifactRef,
+    ) -> bool {
+        let Ok(peers) = self
+            .api
+            .get_json::<serde_json::Value>(token, &format!("/validator/artifacts/{}/peers", r.hash))
+            .await
+        else {
+            return false;
+        };
+        peers["peers"].as_array().is_none_or(|p| p.is_empty())
+            && peers["server_holds"] == serde_json::json!(false)
+    }
+
+    async fn receive_by_push(
+        &self,
+        token: &str,
+        r: &gg_protocol::messages::ArtifactRef,
+        dest: &std::path::Path,
+        push: &(gg_client::p2p::PeerServer, gg_client::reach::Reach),
+    ) -> Result<(), ReadError> {
+        let (server, reach) = push;
+        let mut addrs: Vec<String> = reach.current().await.map(|(a, _)| a).into_iter().collect();
+        for c in reach.candidates(server.addr(), async { None }).await {
+            if !addrs.contains(&c.addr) {
+                addrs.push(c.addr);
+            }
+        }
+        gg_client::p2p::fetch_by_push(
+            &self.api,
+            token,
+            "/validator",
+            &self.network,
+            &self.server_key,
+            r,
+            dest,
+            server,
+            &addrs,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .map_err(ReadError::Peers)?;
+        tracing::info!(hash = %r.hash, "received by push");
+        Ok(())
+    }
+
+    async fn download(
+        &self,
+        token: &str,
+        r: &gg_protocol::messages::ArtifactRef,
+        dest: &std::path::Path,
+    ) -> Result<(), ReadError> {
+        let path = format!("/validator/artifacts/{}", r.hash);
+        match self
+            .api
+            .download_retry(token, &path, r, self.max, dest)
+            .await
+        {
+            Err(ClientError::Status { status: 409, .. }) if self.peers => {
+                if r.size > self.max {
+                    return Err(ReadError::Server(ClientError::Integrity(format!(
+                        "artifact of {} bytes above the local limit",
+                        r.size
+                    ))));
+                }
+                if let Some(push) = &self.push
+                    && self.nobody_reachable_holds(token, r).await
+                {
+                    return self.receive_by_push(token, r, dest, push).await;
+                }
+                let stats = gg_client::p2p::fetch_with_peers(
+                    &self.api,
+                    token,
+                    &self.key,
+                    &self.network,
+                    &self.server_key,
+                    r,
+                    &path,
+                    dest,
+                    &gg_client::p2p::FetchConfig {
+                        allow_private_peers: self.allow_private_peers,
+                        tracker: "/validator".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(ReadError::Peers)?;
+                tracing::info!(hash = %r.hash, from_peers = stats.chunks_from_peers, "read through peers");
+                Ok(())
+            }
+            other => other.map_err(ReadError::Server),
+        }
+    }
+}
+
 /// Inputs announced by the server for prefetching.
 #[derive(Deserialize)]
 struct Upcoming {
@@ -222,12 +374,11 @@ const PREFETCH_EVERY: Duration = Duration::from_millis(500);
 /// An artifact from the cache when an intact copy is there, downloaded (and cached) otherwise,
 /// under its lock. Returns whether it came from the cache.
 async fn fetch_cached(
-    api: &Api,
+    reader: &Reader,
     cache: &gg_client::cache::ArtifactCache,
     locks: &FetchLocks,
     token: &str,
     r: &gg_protocol::messages::ArtifactRef,
-    max: u64,
     dest: &std::path::Path,
 ) -> anyhow::Result<bool> {
     let lock = locks.of(&r.hash);
@@ -235,14 +386,7 @@ async fn fetch_cached(
     if cache.fetch(&r.hash, r.size, dest).ok() == Some(gg_client::cache::Lookup::Hit) {
         return Ok(true);
     }
-    api.download_retry(
-        token,
-        &format!("/validator/artifacts/{}", r.hash),
-        r,
-        max,
-        dest,
-    )
-    .await?;
+    reader.download(token, r, dest).await?;
     if let Err(e) = cache.store(&r.hash, dest) {
         tracing::warn!(error = %e, hash = %r.hash, "artifact cache store failed");
     }
@@ -255,6 +399,7 @@ async fn fetch_cached(
 #[allow(clippy::too_many_arguments)]
 async fn prefetch(
     api: Api,
+    reader: Reader,
     cache: gg_client::cache::ArtifactCache,
     locks: FetchLocks,
     token: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -298,16 +443,7 @@ async fn prefetch(
             }
             let dest = dir.join(r.hash.to_hex());
             let started = Instant::now();
-            match api
-                .download_retry(
-                    &token,
-                    &format!("/validator/artifacts/{}", r.hash),
-                    &r,
-                    max,
-                    &dest,
-                )
-                .await
-            {
+            match reader.download(&token, &r, &dest).await {
                 Ok(()) => match cache.store(&r.hash, &dest) {
                     Ok(()) => {
                         tracing::info!(hash = %r.hash, bytes = r.size, ms = started.elapsed().as_millis() as u64, "input prefetched")
@@ -357,12 +493,44 @@ impl Verifier {
         }
         let cache =
             gg_client::cache::ArtifactCache::new(cfg.work_dir.join("cache"), cfg.cache_max_bytes);
+        let key = std::sync::Arc::new(key);
+        // A chunk server only to receive pushes (A8), when configured: it serves nothing a ticket
+        // does not allow, and takes nothing it does not wait for.
+        let push = if cfg.push_listen.is_empty() || info.p2p_chunk_bytes == 0 {
+            None
+        } else {
+            let server = gg_client::p2p::PeerServer::start(
+                &cfg.push_listen,
+                cache.clone(),
+                info.network_id.clone(),
+                info.server_public_key,
+                8,
+                0,
+            )
+            .await?;
+            let reach = gg_client::reach::Reach::new(gg_client::reach::ReachConfig {
+                advertise_addr: cfg.push_advertise.clone(),
+                ..Default::default()
+            });
+            Some(std::sync::Arc::new((server, reach)))
+        };
+        let reader = Reader {
+            api: api.clone(),
+            key: key.clone(),
+            network: info.network_id.clone(),
+            server_key: info.server_public_key,
+            max: cfg.max_download_bytes,
+            peers: info.p2p_chunk_bytes > 0,
+            allow_private_peers: cfg.allow_private_peers,
+            push,
+        };
         Ok(Self {
             cfg,
             engine,
             api,
             key,
             info,
+            reader,
             validator_id: None,
             token: None,
             cache,
@@ -407,6 +575,7 @@ impl Verifier {
         let prefetcher = self.cfg.prefetch.then(|| {
             tokio::spawn(prefetch(
                 self.api.clone(),
+                self.reader.clone(),
                 self.cache.clone(),
                 self.locks.clone(),
                 self.shared_token.clone(),
@@ -503,41 +672,30 @@ impl Verifier {
         // Inputs (checkpoints, datasets) are shared by many tasks, and prefetched while the worker
         // computes (ADR-0037): served from the local cache when an intact copy (re-hashed) exists,
         // downloaded otherwise. Inputs and outputs are fetched at once.
-        let (api, cache, locks, max) = (
-            &self.api,
-            &self.cache,
-            &self.locks,
-            self.cfg.max_download_bytes,
-        );
+        let (reader, cache, locks) = (&self.reader, &self.cache, &self.locks);
         let dir_ref = &dir;
         let inputs_f = futures_util::future::try_join_all(w.spec.definition.inputs.iter().map(
             |(name, r)| async move {
                 let _timed = TimedInput(name.clone(), r.size, std::time::Instant::now());
                 let dest = dir_ref.join(format!("in-{name}"));
-                let hit = fetch_cached(api, cache, locks, token, r, max, &dest).await?;
+                let hit = fetch_cached(reader, cache, locks, token, r, &dest).await?;
                 Ok::<_, anyhow::Error>((name.clone(), dest, hit))
             },
         ));
-        // An output that cannot be fetched intact yields a decision (missing candidate →
-        // inconclusive/rejected by the catalog verifier), never a crash of the validator.
+        // An output the control plane cannot serve intact yields a decision (missing candidate →
+        // inconclusive/rejected by the catalog verifier), never a crash of the validator. One held
+        // only by peers that cannot be read now (a lab node offline) is not the worker's fault:
+        // the verification is released and tried again.
         let outputs_f = futures_util::future::join_all(w.submission.body.outputs.iter().map(
             |(name, r)| async move {
                 let dest = dir_ref.join(format!("out-{name}"));
-                match api
-                    .download_retry(
-                        token,
-                        &format!("/validator/artifacts/{}", r.hash),
-                        r,
-                        max,
-                        &dest,
-                    )
-                    .await
-                {
-                    Ok(()) => Some((name.clone(), dest)),
-                    Err(e) => {
+                match reader.download(token, r, &dest).await {
+                    Ok(()) => Ok(Some((name.clone(), dest))),
+                    Err(ReadError::Server(e)) => {
                         tracing::warn!(error = %e, output = %name, "output download failed");
-                        None
+                        Ok(None)
                     }
+                    Err(e @ ReadError::Peers(_)) => Err(e),
                 }
             },
         ));
@@ -548,7 +706,12 @@ impl Verifier {
             .into_iter()
             .map(|(name, dest, _)| (name, dest))
             .collect();
-        let outputs: BTreeMap<String, PathBuf> = fetched_outputs.into_iter().flatten().collect();
+        let mut outputs = BTreeMap::<String, PathBuf>::new();
+        for o in fetched_outputs {
+            if let Some((name, dest)) = o? {
+                outputs.insert(name, dest);
+            }
+        }
         let fetched = started.elapsed();
         let (mut verdict, reference_profile) = gg_compute::verify_task_on(
             &task,

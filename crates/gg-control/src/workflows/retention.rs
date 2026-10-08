@@ -65,7 +65,8 @@ fn digests_in(text: &str, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Every job of a round: its own, and for a staged round each wave's.
+/// Every job of a round: its own, for a staged round each wave's, and their twin jobs (the other
+/// computations of their tasks and their comparers, ADR-0042).
 async fn round_jobs(
     c: &mut sqlx::PgConnection,
     round: &cq::CollectiveRoundRow,
@@ -78,6 +79,11 @@ async fn round_jobs(
             if !out.contains(&j) {
                 out.push(j);
             }
+        }
+    }
+    for j in gg_storage::queries::replicas::twin_jobs(c, &out).await? {
+        if !out.contains(&j) {
+            out.push(j);
         }
     }
     Ok(out)

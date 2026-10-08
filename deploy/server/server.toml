@@ -86,6 +86,14 @@ p2p_dial_back_timeout_ms = 1500
 audit_rate = 0.25
 # Share of the results a GPU validator decided that a CPU validator recomputes again (ADR-0031).
 engine_check_rate = 0.1
+# Verification by other contributors (ADR-0042): every task computed again by another contributor
+# account drawn by the server, and the results compared, instead of recomputed by a validator (the
+# validators then have nothing to do). A share of the tasks, and every task of an account still in
+# probation, get a third computation; a lab node's comparisons are checked by contributors.
+replica_verification = true
+pairing_reserve_secs = 30
+spot_check_rate = 0.05
+probation_tasks = 20
 # Memory for the optimizer state kept between rounds (ADR-0036): 4 GiB holds SmolLM2-135M's weights
 # and Adam moments (1.6 GB) twice over. A run that does not fit is stepped from disk. 0 disables it.
 step_cache_bytes = 4294967296
@@ -95,9 +103,9 @@ step_cache_bytes = 4294967296
 # checkpoints not kept. Kept: step 0, every checkpoint_keep_every steps, the current checkpoint and
 # everything researchers uploaded. SmolLM2 leaves about 2 GB per round without it.
 retention = true
-retention_after_secs = 3600
+retention_after_secs = 600                 # a round is removed only once settled: the delay is a margin, not a guarantee
 checkpoint_keep_every = 50
-retention_interval_secs = 300
+retention_interval_secs = 60
 
 # Data rule published by GET /v1/info and accepted explicitly when a project is created
 # (gg admin project-create --ack-data-policy). "research-any-data": any research data is accepted,

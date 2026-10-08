@@ -112,26 +112,42 @@ pub async fn submit_result(
         super::decode_spec(&task.spec_cbor)?.definition.params,
         gg_protocol::messages::TaskParamsV1::GraphStage(_)
     );
+    // Or any output of a job a lab node holds: the node pulls it (ADR-0041).
+    let holder = jobs::output_holder(&mut tx, task.job_id).await?;
+    let node_held = holder.is_some();
     for (name, r) in &body.outputs {
-        let row = artifacts::get_artifact(&mut tx, &r.hash).await?;
-        if row.is_none() && staged && (name.starts_with("out.") || name.starts_with("din.")) {
+        let mut row = artifacts::get_artifact(&mut tx, &r.hash).await?;
+        if row.is_none()
+            && (node_held || (staged && (name.starts_with("out.") || name.starts_with("din."))))
+        {
             let declared =
                 gg_storage::queries::pending::get_for_attempt(&mut tx, &r.hash, attempt.0).await?;
             match declared {
                 Some(p) if p.size == r.size && p.project_id == task.project_id => continue,
-                _ => {
+                Some(_) => {
                     return Err(ApiError::Unprocessable(format!(
-                        "output '{name}' was neither uploaded nor declared by this attempt"
+                        "output '{name}' does not match its declaration"
                     )));
+                }
+                None => {
+                    // Between the two reads, its holder may have got it: the declaration goes
+                    // and the artifact is recorded in one commit (a durable copy, ADR-0026, or a
+                    // lab node's pull, ADR-0041). Read the artifact again before refusing.
+                    row = artifacts::get_artifact(&mut tx, &r.hash).await?;
+                    if row.is_none() {
+                        return Err(ApiError::Unprocessable(format!(
+                            "output '{name}' was neither uploaded nor declared by this attempt"
+                        )));
+                    }
                 }
             }
         }
         let row = row
             .ok_or_else(|| ApiError::Unprocessable(format!("output '{name}' was not uploaded")))?;
-        if row.size as u64 != r.size
-            || row.project_id != Some(task.project_id)
-            || !state.objects().exists(&r.hash)
-        {
+        // Stored by the server, or already pulled by the job's node.
+        let held = state.objects().exists(&r.hash)
+            || (node_held && artifacts::held_by_node(&mut tx, &r.hash).await? == holder);
+        if row.size as u64 != r.size || row.project_id != Some(task.project_id) || !held {
             return Err(ApiError::Unprocessable(format!(
                 "output '{name}' does not match a stored artifact of this project"
             )));
@@ -164,25 +180,30 @@ pub async fn submit_result(
     )
     .await?;
     tasks::release_lease(&mut tx, attempt).await?;
-    tasks::insert_verification(
-        &mut tx,
-        uuid::Uuid::now_v7(),
-        submission_id,
-        TaskId(task.id),
-        attempt,
-    )
-    .await?;
-    // Unpredictable audit (ADR-0014): drawn from a server-side secret *after* the result is
-    // recorded. The worker has already committed; nothing in its answer says whether it was drawn.
-    super::federated::maybe_open_audit(
-        state,
-        &mut tx,
-        submission_id,
-        &hash,
-        TaskId(task.id),
-        attempt,
-    )
-    .await?;
+    // With replicated verification (ADR-0042), the result is compared with another contributor's
+    // computation of the same task, not recomputed by a validator.
+    if !super::replicas::replicated(&mut tx, &task).await? {
+        tasks::insert_verification(
+            &mut tx,
+            uuid::Uuid::now_v7(),
+            submission_id,
+            TaskId(task.id),
+            attempt,
+        )
+        .await?;
+        // Unpredictable audit (ADR-0014): drawn from a server-side secret *after* the result is
+        // recorded. The worker has already committed; nothing in its answer says whether it was
+        // drawn.
+        super::federated::maybe_open_audit(
+            state,
+            &mut tx,
+            submission_id,
+            &hash,
+            TaskId(task.id),
+            attempt,
+        )
+        .await?;
+    }
     misc::outbox_insert(
         &mut tx,
         "result.submitted",

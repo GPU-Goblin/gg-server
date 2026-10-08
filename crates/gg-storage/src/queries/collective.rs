@@ -32,6 +32,8 @@ pub struct CollectiveRunRow {
     pub created_at: OffsetDateTime,
     /// Updated.
     pub updated_at: OffsetDateTime,
+    /// Lab node that steps the run (ADR-0041), when one does.
+    pub holder_node: Option<Uuid>,
 }
 
 /// Round row.
@@ -59,7 +61,7 @@ pub struct CollectiveRoundRow {
     pub closed_at: Option<OffsetDateTime>,
 }
 
-const RUN_COLS: &str = "id, project_id, experiment_id, name, state, config, step, checkpoint, failure, created_at, updated_at";
+const RUN_COLS: &str = "id, project_id, experiment_id, name, state, config, step, checkpoint, failure, created_at, updated_at, holder_node";
 const ROUND_COLS: &str = "id, run_id, step, attempt, round_seed, job_id, state, expected_examples, created_at, closed_at";
 
 /// Insert a run.
@@ -387,4 +389,102 @@ pub async fn list_runs(
         .fetch_all(c)
         .await?,
     )
+}
+
+/// Make `node` the one that steps a run (ADR-0041).
+pub async fn set_run_holder(
+    c: &mut PgConnection,
+    run: Uuid,
+    node: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query("UPDATE collective_runs SET holder_node = $2 WHERE id = $1")
+        .bind(run)
+        .bind(node)
+        .execute(c)
+        .await?;
+    Ok(())
+}
+
+/// Running runs a lab node steps.
+pub async fn running_runs_of_node(
+    c: &mut PgConnection,
+    node: Uuid,
+) -> Result<Vec<CollectiveRunRow>, StorageError> {
+    Ok(
+        sqlx::query_as::<_, CollectiveRunRow>(sqlx::AssertSqlSafe(format!(
+            "SELECT {RUN_COLS} FROM collective_runs WHERE holder_node = $1 AND state = 'running' ORDER BY created_at"
+        )))
+        .bind(node)
+        .fetch_all(c)
+        .await?,
+    )
+}
+
+/// Whether a run `node` steps names `hash` in its configuration (its description, its datasets).
+pub async fn node_run_names(
+    c: &mut PgConnection,
+    node: Uuid,
+    hash: &gg_core::Sha256Digest,
+) -> Result<bool, StorageError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM collective_runs
+          WHERE holder_node = $1 AND position($2 in config::text) > 0)",
+    )
+    .bind(node)
+    .bind(hash.to_hex())
+    .fetch_one(c)
+    .await?)
+}
+
+/// The open round of a run, if there is one.
+pub async fn open_round_of(
+    c: &mut PgConnection,
+    run: Uuid,
+) -> Result<Option<CollectiveRoundRow>, StorageError> {
+    Ok(sqlx::query_as::<_, CollectiveRoundRow>(
+        "SELECT id, run_id, step, attempt, round_seed, job_id, state, expected_examples, created_at, closed_at
+           FROM collective_rounds WHERE run_id = $1 AND state = 'open' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(run)
+    .fetch_optional(c)
+    .await?)
+}
+
+/// Record the rows a lab node cut for `step` of `run`. Returns the rows already recorded for that
+/// step instead when there are some (they are never replaced).
+pub async fn insert_node_rows(
+    c: &mut PgConnection,
+    run: Uuid,
+    step: i32,
+    rows: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, StorageError> {
+    let inserted = sqlx::query(
+        "INSERT INTO node_round_rows (run_id, step, rows) VALUES ($1, $2, $3)
+         ON CONFLICT (run_id, step) DO NOTHING",
+    )
+    .bind(run)
+    .bind(step)
+    .bind(rows)
+    .execute(&mut *c)
+    .await?
+    .rows_affected();
+    if inserted == 1 {
+        return Ok(None);
+    }
+    node_rows(c, run, step).await
+}
+
+/// The rows a lab node cut for `step` of `run`.
+pub async fn node_rows(
+    c: &mut PgConnection,
+    run: Uuid,
+    step: i32,
+) -> Result<Option<serde_json::Value>, StorageError> {
+    Ok(sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT rows FROM node_round_rows WHERE run_id = $1 AND step = $2",
+    )
+    .bind(run)
+    .bind(step)
+    .fetch_optional(c)
+    .await?)
 }

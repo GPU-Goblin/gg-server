@@ -40,6 +40,17 @@ pub enum Principal {
         /// Authorized flag.
         authorized: bool,
     },
+    /// Lab node session (ADR-0041).
+    Node {
+        /// Id.
+        id: NodeId,
+        /// Signing key.
+        key: PublicKey,
+        /// The researcher it works for.
+        researcher: ResearcherId,
+        /// Not revoked, and its researcher still approved.
+        active: bool,
+    },
 }
 
 impl Principal {
@@ -50,6 +61,7 @@ impl Principal {
             Principal::Researcher { id, .. } => format!("researcher:{id}"),
             Principal::Worker { id, .. } => format!("worker:{id}"),
             Principal::Validator { id, .. } => format!("validator:{id}"),
+            Principal::Node { id, .. } => format!("node:{id}"),
         }
     }
 }
@@ -129,6 +141,27 @@ pub async fn authenticate(state: &AppState, token: &str) -> Result<Principal, Ap
                     id: ValidatorId(v.id),
                     key,
                     authorized: v.authorized,
+                })
+            }
+            "node" => {
+                let n = gg_storage::queries::nodes::get(&mut c, NodeId(s.principal_id))
+                    .await?
+                    .ok_or(ApiError::Unauthorized)?;
+                let key = PublicKey(
+                    n.public_key
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| ApiError::Unauthorized)?,
+                );
+                let researcher = ResearcherId(n.researcher_id);
+                let approved = identities::get_researcher(&mut c, researcher)
+                    .await?
+                    .is_some_and(|r| r.admission().ok() == Some(AdmissionState::Approved));
+                Ok(Principal::Node {
+                    id: NodeId(n.id),
+                    key,
+                    researcher,
+                    active: n.revoked_at.is_none() && approved,
                 })
             }
             _ => Err(ApiError::Unauthorized),
@@ -285,6 +318,41 @@ impl FromRequestParts<AppState> for Validator {
                 authorized: false, ..
             } => Err(ApiError::Forbidden("validator not authorized".into())),
             _ => Err(ApiError::Forbidden("validator session required".into())),
+        }
+    }
+}
+
+/// A lab node session, not revoked, working for an approved researcher (ADR-0041).
+pub struct LabNode {
+    /// Id.
+    pub id: NodeId,
+    /// Key.
+    pub key: PublicKey,
+    /// The researcher it works for.
+    pub researcher: ResearcherId,
+}
+
+impl FromRequestParts<AppState> for LabNode {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match Principal::from_request_parts(parts, state).await? {
+            Principal::Node {
+                id,
+                key,
+                researcher,
+                active: true,
+            } => Ok(LabNode {
+                id,
+                key,
+                researcher,
+            }),
+            Principal::Node { active: false, .. } => Err(ApiError::Forbidden(
+                "lab node revoked, or its researcher is not approved".into(),
+            )),
+            _ => Err(ApiError::Forbidden("lab node session required".into())),
         }
     }
 }

@@ -42,6 +42,12 @@ pub struct Info {
     /// A worker declaring an activation before its durable copy computes its chunk digests with it
     /// (ADR-0026).
     pub p2p_chunk_bytes: u32,
+    /// Largest output of a job a lab node holds that the control plane still accepts as an upload
+    /// (ADR-0041); larger ones are declared and pulled by the node.
+    pub node_relay_max_bytes: u64,
+    /// How long a declared output waits for its holder before its task is sent again: a worker
+    /// keeps serving it that long.
+    pub pending_output_secs: i64,
 }
 
 /// One operator of the published profile (ADR-0016).
@@ -131,6 +137,8 @@ async fn info(State(state): State<AppState>) -> Json<Info> {
         } else {
             0
         },
+        node_relay_max_bytes: state.config().node_relay_max_bytes,
+        pending_output_secs: state.config().pending_output_secs,
     })
 }
 

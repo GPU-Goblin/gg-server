@@ -688,3 +688,19 @@ pub async fn get_receipt_by_id(
     .fetch_optional(c)
     .await?)
 }
+
+/// Close every open verification of an attempt the server has decided itself (its outputs never
+/// reached their holder, ADR-0041): no validator is offered it any more.
+pub async fn close_verifications_of_attempt(
+    c: &mut PgConnection,
+    attempt: AttemptId,
+) -> Result<u64, StorageError> {
+    Ok(sqlx::query(
+        "UPDATE verifications SET state = 'decided', validator_id = NULL, lease_expires_at = NULL, updated_at = now()
+          WHERE attempt_id = $1 AND state <> 'decided'",
+    )
+    .bind(attempt.0)
+    .execute(c)
+    .await?
+    .rows_affected())
+}

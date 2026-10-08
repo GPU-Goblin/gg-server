@@ -32,6 +32,10 @@ pub struct SubmitJobRequest {
     /// Plan only: nothing is persisted.
     #[serde(default)]
     pub dry_run: bool,
+    /// One of the researcher's lab nodes, which pulls the outputs instead of the control plane
+    /// storing them (ADR-0041). Only workers that serve peers take such a job.
+    #[serde(default)]
+    pub output_holder: Option<NodeId>,
 }
 
 /// Planned task.
@@ -120,7 +124,9 @@ async fn validate_definition(
                 "task {index}: input '{name}' is not readable by this project"
             )));
         }
-        if !state.objects().exists(&r.hash) {
+        // Stored by the server, or held by a lab node that serves it to peers (ADR-0041).
+        if !state.objects().exists(&r.hash) && artifacts::held_by_node(c, &r.hash).await?.is_none()
+        {
             return Err(ApiError::Internal(format!(
                 "artifact {} missing from object store",
                 r.hash
@@ -151,6 +157,21 @@ pub async fn submit_job(
         return Err(ApiError::Unprocessable("names must be <= 128 bytes".into()));
     }
     let mut tx = state.db().begin().await?;
+    if let Some(node) = req.output_holder {
+        let row = gg_storage::queries::nodes::get(&mut tx, node).await?;
+        if row.is_none_or(|n| n.revoked_at.is_some())
+            || !gg_storage::queries::nodes::attached(&mut tx, node, project).await?
+        {
+            return Err(ApiError::Unprocessable(
+                "output_holder: not an active lab node attached to this project".into(),
+            ));
+        }
+        if !state.config().p2p_enabled {
+            return Err(ApiError::Unprocessable(
+                "output_holder: peer distribution is disabled on this server".into(),
+            ));
+        }
+    }
     let proj = identities::get_project(&mut tx, project)
         .await?
         .ok_or_else(|| ApiError::NotFound("project".into()))?;
@@ -240,6 +261,9 @@ pub async fn submit_job(
         &req.name,
     )
     .await?;
+    if let Some(node) = req.output_holder {
+        jobs::set_output_holder(&mut tx, job_id, node).await?;
+    }
     let mut tasks = Vec::with_capacity(validated.len());
     for (i, v) in validated.into_iter().enumerate() {
         let task_id = TaskId::new();

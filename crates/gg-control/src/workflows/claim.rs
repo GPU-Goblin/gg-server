@@ -23,6 +23,9 @@ pub struct Claimed {
     /// Input artifacts to download.
     #[schema(value_type = Vec<Object>)]
     pub inputs: Vec<NamedArtifact>,
+    /// A lab node pulls this task's outputs (ADR-0041): the worker declares the large ones and
+    /// serves them instead of uploading them.
+    pub outputs_to_node: bool,
 }
 
 /// Named artifact reference.
@@ -92,17 +95,24 @@ pub async fn claim_once(
             .project_state()
             .map_err(|e| ApiError::Internal(e.to_string()))?
             != ProjectState::Active
-            || !proj.allowed_kinds.contains(&task.compute_kind)
+            // A comparer's task (ADR-0042) is the server's check of the project's own tasks.
+            || !(proj.allowed_kinds.contains(&task.compute_kind)
+                || task.compare_family.is_some())
         {
             continue;
         }
         let spec: TaskSpecV1 = decode_spec(&task.spec_cbor)?;
         let role = AttemptRole::Primary;
-        let amount = spec
-            .definition
-            .reward_schedule
-            .reservation_for(role)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        // With replicated verification (ADR-0042), no validator recomputes: only the reward is
+        // reserved (the replicas reserve their own).
+        let amount = if cfg.replica_verification {
+            spec.definition.reward_schedule.for_role(role)
+        } else {
+            spec.definition
+                .reward_schedule
+                .reservation_for(role)
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+        };
         let budget = gg_ledger::budget(&mut tx, project).await?;
         if budget.available < amount {
             tracing::debug!(task = %task.id, project = %project, "insufficient budget, skipping task");
@@ -171,6 +181,10 @@ pub async fn claim_once(
             &serde_json::json!({ "task_id": task.id, "attempt_id": attempt_id, "worker_id": worker, "generation": generation }),
         )
         .await?;
+        let outputs_to_node = jobs::output_holder(&mut tx, task.job_id).await?.is_some();
+        // Replicated verification (ADR-0042): the second computation, by another account, starts
+        // at once.
+        super::replicas::ensure_replica(state, &mut tx, &task, &spec, worker).await?;
         tx.commit().await?;
         let inputs = spec
             .definition
@@ -182,6 +196,7 @@ pub async fn claim_once(
             assignment: signed,
             spec,
             inputs,
+            outputs_to_node,
         }));
     }
     tx.rollback().await?;

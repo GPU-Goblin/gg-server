@@ -74,7 +74,7 @@ concerns bubblewrap on contributors' machines, not this server, which runs no sa
 | | Minimum for the beta | Why |
 |---|---|---|
 | Memory | 16 GB | PostgreSQL, the validator, and the optimizer state kept between rounds (`step_cache_bytes`, 4 GiB by default: SmolLM2's weights and Adam moments take 1.6 GB, ADR-0036) |
-| Disk | 200 GB, SSD | Researchers' datasets and checkpoints, the kept checkpoints (step 0, every 50 steps, the current one) and one hour of intermediate artifacts per run (about 2 GB per SmolLM2 round before retention removes them, ADR-0040), backups |
+| Disk | 200 GB, SSD | Researchers' datasets and checkpoints, the kept checkpoints (step 0, every 50 steps, the current one), about ten minutes of intermediate artifacts per run (2 GB per SmolLM2 round until retention removes them, ADR-0040: 20 to 100 GB for one such run), backups |
 | CPU | 8 cores | The CPU validator recomputes a sample of GPU-validated model tasks (engine checks) and every task no GPU validator takes |
 
 The server has no GPU. A GPU validator, if any, runs on another machine of a validation operator

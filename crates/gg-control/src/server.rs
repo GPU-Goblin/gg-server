@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub fn build_app(state: AppState) -> Router {
     api::router(state.clone())
         .merge(crate::portal::router(state.clone()))
+        .merge(crate::portal::contributor_api(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::quota::layer,

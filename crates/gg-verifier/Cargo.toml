@@ -21,7 +21,7 @@ cuda = ["gg-compute/cuda"]
 gg-core = { workspace = true }
 gg-protocol = { workspace = true }
 gg-compute = { workspace = true }
-gg-client = { workspace = true }
+gg-client = { workspace = true, features = ["p2p"] }
 tokio = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }

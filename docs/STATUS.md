@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-09-25.
+Last updated: 2026-09-29.
 
 This document says what GPU Goblin does today, what each claim rests on, and what is simulated or
 missing. Every number below was measured by running the code; the command or test that produced
@@ -128,6 +128,85 @@ signed.
 |---|---|
 | Audited submission paid only after two distinct operators; two keys of one operator count once; dispute settlement refused on an unsigned outcome (422) and settled only once (409) | `gg-control/tests/federated.rs` |
 | Audit draws are deterministic given the secret, differ across secrets, and follow the rate (about 500 of 2000 at 25%) | unit tests in `workflows::federated` |
+
+**The public site gpugoblin.com** (`web/`, Zola; deployed 2026-09-26 on the shared server with
+`deploy/server/nginx-gpugoblin-site.conf`). Ten pages in fifteen languages (English and French
+written and read by hand; the thirteen others machine-translated, each checked by
+`web/check_lang.py`: same keys, placeholders, untranslated values, links and code blocks, and a
+build). Contributor sign-in and account on the site through `/contributor/v1` proxied under the
+site's own address (no cross-site request); researchers are sent to the grid's portal. SEO: titles,
+descriptions, canonical URLs, hreflang between the fifteen versions, sitemap, Open Graph image,
+JSON-LD (Organization, WebSite, WebPage, FAQPage, SoftwareApplication); for language models
+`llms.txt` and `llms-full.txt`, and `robots.txt` naming the AI crawlers as allowed. Strict CSP (only
+the site itself), no cookie, no tracking. Legal notice and privacy policy (French authoritative).
+Downloads are shown as "coming with the first signed release" until a signed release exists
+(`releases_published` in `web/config.base.toml`). Sign-up answers "not open yet" until the mail
+relay is configured.
+
+**The owner's control of a worker, and the application** ([ADR-0043](adr/0043-contributor-desktop-app.md),
+parts 1 and 2, Linux). The Windows port (part 3, [ADR-0045](adr/0045-windows-sandbox.md)) is
+in progress and **has not run on Windows yet**: see the paragraph below. The application has an About page (Nicolas Michel — LAAS-CNRS, contact@gpugoblin.com,
+thanks, licence), a console mode for servers, and drives one worker per graphics card. At start
+it offers to sign in or create an account (e-mail code, JSON contributor API) and then installs
+without copying a code; it speaks fifteen languages (machine translations, to be read by native
+speakers; no Arabic or Urdu: egui has no right-to-left layout).
+
+| Claim | Evidence |
+|---|---|
+| A policy (pause, only when idle, hours through midnight, GPU temperature, yielding the card to a game, memory) decides whether a task is claimed; windows and gates checked | `gg-worker` `control` unit tests |
+| The control API listens on loopback only, refuses without the token (constant-time check), pauses (immediately: the running task is told to stop), writes the policy back, refuses an impossible one | `gg-worker/tests/control.rs` |
+| The real agent asks the server for nothing while paused, asks again once resumed, stops again when paused; it reports the credits and accepted computations the server counts | `gg-worker/tests/policy.rs` |
+| On a local grid: "pause now" during a 2048³ product abandoned it, the worker waited, resumed, and all 5 tasks were accepted | by hand, `cargo xtask demo --kind matmul --dim 2048 --jobs 5 --workers 1` with the API driven by `curl` |
+| `gg-desk`, the application: its link finds the worker through the files it writes, reads its status, pauses, writes a policy, shows a refusal, resumes; the enrollment code is checked before the installer runs; days of a window toggle back to "every day" | `gg-desk/tests/link.rs`, `gg-desk` unit tests |
+| The application against a worker of the local grid: computing, then waiting because the session is in use (only when away); the settings show the worker's policy | pictures with `gg-desk --screenshot` during `cargo xtask demo --kind matmul --dim 2048 --jobs 5 --workers 1` |
+| Several cards: the application finds a worker in the data directory and in `gpu1`, labels them by card, pauses one while the machine lends, then both; the console without a display resumes one card, prints JSON, writes a policy to both, refuses an absent card and an impossible value without changing anything, exits 2 with no worker | `gg-desk/tests/link.rs` (two real control APIs, the `gg-desk` binary); `console` unit tests (schedules, `set`) |
+| `install.sh --gpu --gpus 3`: three configurations (engines `gpu`, `gpu:1`, `gpu:2`; loopback ports 7460 and free ones; data directories `gpu1`, `gpu2`; names), `init` and `doctor` for each, the `gg-worker@.service` template, `gg-desk` for the terminal only without a desktop | by hand: the installer run end to end against a release signed by a throwaway key, stand-in binaries, `--no-start`; the real `gg-worker` loads the generated `worker-gpu1.toml` |
+| The contributor account as JSON: code sent (422 for a bad address), wrong code 403, session, a used code refused, `me` without or with a wrong session 401, enrollment code, a machine attaches itself with it and appears in `me`, the page's cookie shows the same account, sign-out; 404 while sign-up is closed | `gg-control/tests/contributors.rs` |
+| The application's languages: every text translated in all fifteen, nothing else, placeholders kept, a glyph for every character; the session file is 0600; only https (or this machine) is accepted as a grid | `gg-desk` unit tests (`i18n`, `account`, `welcome`); pictures of the welcome screen in English, Hindi and Chinese |
+| The sandbox numbers CUDA cards in bus order (`CUDA_DEVICE_ORDER=PCI_BUS_ID`), and `doctor` accepts that variable inside | `gg-worker` `sandbox` unit test |
+
+**Windows port** ([ADR-0045](adr/0045-windows-sandbox.md)). Built on this Linux machine for
+`x86_64-pc-windows-msvc` with cargo-xwin in Docker (`gg-tools/xwin.sh`), run on a **Windows 11
+Enterprise evaluation virtual machine** (build 26300, QEMU/KVM through `dockurr/windows`, 4 cores,
+8 GB, no graphics card; scripts in `gg-tools/winvm/`). The processor engine works there; the
+graphics engines (Vulkan, CUDA) have not run on Windows, which needs a real machine with a card.
+Windows is not announced on the site (`windows_available = false`).
+
+| Claim | Evidence |
+|---|---|
+| The sandbox holds on Windows 11, as an elevated administrator and as a standard user: AppContainer token without capability at low integrity; a job of one process with a memory limit, killed with the worker; loopback and the internet unreachable; the user's files unreadable; the system and the bundle root read-only, outputs writable; another program blocked by Windows; memory past the limit refused; only the variables set on purpose | `gg-worker/tests/sandbox_windows.rs` (4 of 4 on the VM), `gg-worker doctor` in public mode: "agent may start" |
+| The executor refuses to compute when started outside the sandbox; the worker refuses an elevated token (as root on Linux) and a program folder the user does not own, with the reason | `sandbox_windows.rs` (`outside_the_sandbox_the_executor_refuses…`), `doctor` as administrator and as a standard user |
+| A real grid: the Windows worker of a standard user, in the AppContainer, registered, was authorized and computed 6 of 6 matmul tasks, all accepted after the validator's recomputation; ledger balanced | `gg-tools/winvm/e2e.sh` (`cargo xtask demo --kind matmul --jobs 6 --workers 0 --external-workers 1`, worker in the VM through a relay on the Docker bridge): "demo OK" |
+| Problems found only by running on Windows, fixed: no `VCRUNTIME140.dll` on a fresh Windows (the C runtime is now linked in); `LOCALAPPDATA` required by Windows to create an AppContainer process; the hidden console host of `CREATE_NO_WINDOW` is a child process, which the policy forbids (`DETACHED_PROCESS` now); each task rewrote the access lists of the program folders (now only when missing) | commits `32fd463`, `acaad35` |
+| Tests of the worker and the application on Windows: peer exchange in dual stack (13), the owner's policy with the real worker (pause), the control API, enrollment, NAT-PMP, UPnP, the application's console with two cards, installer decisions, launcher quoting and environment | the test executables of `gg-worker` and `gg-desk` run on the VM: all pass but `i18n::every_language…`, which reads the source tree and has no sources there (it passes on Linux) |
+| Linux unchanged by the port: tasks and executor sessions start through one `Launch`; the agent's `Session` answers a task in the real bubblewrap sandbox | `gg-worker/tests/sandbox.rs`, `cargo xtask demo --kind matmul` |
+
+| The application installs, starts, lives in the notification area and is removed, in a real Windows session (UAC on, administrator not elevated), from a test release signed by a throwaway key: `GPUGoblinSetup.exe` opened from Explorer asks for no elevation (manifest `asInvoker`); signature and digests checked, version installed side by side, older versions removed, doctor passed, start at logon (the application came back after a reboot), Start menu entry and entry in the list of installed apps with the program's icon; the tray icon with its tooltip, opening the window, its menu (pause, stop now, resume greyed while lending, quit); `gg-desk uninstall` asks twice, keeps the key and settings when told to, removes the programs folder, the start at logon, the Start menu entry and the list entry | by hand on the VM: `gg-tools/winvm/make-release.sh`, `gg-desk install --server-url http://127.0.0.1:18080` in the user's session, screenshots (`shot.sh`) and clicks (`vm.sh`) |
+| Problems found only in a Windows session, fixed: without a graphics driver OpenGL 2 is missing and the window could not open (drawn with Direct3D 12 now, which falls back to Windows' software renderer); a program named like an installer is elevated by Windows (manifest); the uninstaller left its own program behind (it now waits for its process to end); the installer's output redirected to a file was lost; the taskbar showed a generic icon | commits `29018fa`, `fb96f9d` and the one before |
+
+| A release carries the Windows files: `cargo xtask windows` builds them (cross-compiled in Docker, image pinned by digest, or native on Windows) with the release key of `install.sh` compiled into the application, and adds them to the unsigned manifest; it refuses while `install.sh` holds the placeholder key. Rehearsed end to end with a throwaway key: 17 files signed and verified by `ssh-keygen`/`sha256sum`, `GPUGoblinSetup.exe` downloaded from the release and run on the VM, worker installed, `doctor` passed; a later version replaced a running one | `cargo xtask release` + `cargo xtask windows --allowed-signers …` + `gg release sign`, docs/RELEASE.md |
+
+| The native CUDA engine on Windows: the CUDA executor built for Windows against the pinned official LibTorch (cross-compiled, it imports `torch_cuda.dll`); the installer downloaded LibTorch from PyTorch inside the VM (2.9 GB, size and SHA-256 checked, unpacked by digest, reused by the next version), installed Microsoft's Visual C++ runtime after Windows' approval (its signature checked first), wrote the CUDA configuration; LibTorch loads inside the AppContainer with every protection holding; without an NVIDIA card the engine reports "CUDA is not available" and doctor refuses, as it must | the VM: `gg-desk install --cuda`, doctor; `cargo xtask windows` |
+
+Not done: signing the Windows programs themselves (Authenticode: SmartScreen warns about an unsigned download); router port mapping (no default gateway reading on Windows); AMD/Intel card temperature on Windows; the tray menu from the keyboard (only the mouse opens it); Vulkan and CUDA computing inside the AppContainer (real hardware with a card).
+
+**Verification by other contributors** ([ADR-0042](adr/0042-peer-verification.md), steps 1 to 5,
+`replica_verification`, off by default). Each task is computed again by a worker of another
+contributor account, drawn by the server, and the two results are compared instead of being
+recomputed by a validator.
+
+| Claim | Evidence |
+|---|---|
+| Two accounts that agree are both accepted and paid (primary and replica receipts), with no validator verification; another worker of the first account is not offered the replica; the replica's assignment says `primary` | `gg-control/tests/replicas.rs` (`two_contributors_that_agree_are_both_paid`) |
+| A replica that lies calls a third computation by a third account; the majority is accepted and paid, the liar rejected and not paid, its task cancelled | `a_replica_that_lies_is_outvoted_and_not_paid` |
+| The replica goes first to the worker the server drew, whoever asks first | `the_replica_goes_first_to_the_worker_the_server_drew`; the draw's stability and independence in `workflows::replicas` unit tests |
+| Three computations that all differ open three disputes; nothing paid until an operator settles one | `three_computations_that_all_differ_go_to_a_human` |
+| The comparison: both ways, within the task's tolerance, JSON metadata without the machine's profile | `gg-compute` `replica` unit tests |
+| A job a lab node holds: the node compares; its agreement is taken; a difference it finds counts once a comparer of a foreign account finds it too, then a third computation settles the task; a node that claims a difference two comparers do not find is suspended and both computations accepted; a comparer contradicted by a second has its account suspended. The server reads no output | `gg-node/tests/replicas.rs` |
+| Spot checks and probation: a drawn (or probation) task has its third computation from the start and waits for it; three that agree are all paid; a pair that returns the same wrong result, contradicted by the check, has both accounts suspended (their machines get no more work) and goes to disputes; the draw follows the rate (about 100 of 2000 at 5 %) | `gg-control/tests/replicas.rs`, `workflows::replicas` unit tests |
+| A comparer's verdict can be checked exactly by comparing again (a lying verdict rejected) | `gg-compute` `replica` unit tests |
+| A worker drawn for a replica but busy (or whose account has since computed another computation of the task) does not hold it: another account takes it at once. Found by the demo: a 30 s stall per round (graph run 124 s instead of 4 s) | `a_busy_drawn_worker_does_not_hold_the_replica` (fails without the fix) |
+| Real binaries, replicas on, probation making every task three computations: `cargo xtask demo --replicas` (MLP grid 4.0 s), `--kind matmul --replicas` (3.5 s), `--kind matmul --node --replicas` (2.8 s), `--kind collective --replicas` (4.9 s), `--kind graph --replicas` (3.9 s, against 3.4 s with a validator), `--kind graph --node --replicas` (5.0 s); one receipt per accepted computation, spent = rewards (no validator's recomputation charged) | demo reports |
 | `cargo xtask demo --kind matmul --federated` | 6/6 receipts cite two signed decisions from two named operators |
 | `cargo xtask demo --kind matmul --federated --faults` | a third validator accepts without recomputing: 3 disputes opened and settled as `rejected`, no corrupted result paid, 14/14 checks |
 
@@ -282,6 +361,77 @@ an announced address before advertising it.
 | Lying peer in the reference demo | `cargo xtask demo --kind collective --p2p --faults`: corrupted chunks rejected against the manifest, 40/40 tasks accepted, final checkpoint equivalent |
 | UPnP-IGD on a real consumer router: mapping created, confirmed in the router's table, deleted and confirmed absent | `gg-worker nat-probe --map 47654 --lease 60`; `gg-worker/tests/upnp.rs` (real SOAP exchange) |
 | NAT-PMP against a gateway speaking RFC 6886 | `gg-worker/tests/natpmp.rs` (real UDP exchange, bounded timeout) |
+
+**Lab node** ([ADR-0041](adr/0041-lab-node.md), A1 to A7). A researcher registers
+the key of a node running on their own machine (`POST /researcher/nodes`); the node signs in by
+challenge, takes a file into its store, declares its hash, size and chunk digests for a project
+(`POST /node/artifacts/{hash}`) and serves the chunks itself, announcing its address (dialled back
+by the control plane) and renewing the announcement. The server records the declaration, signs the
+manifest from the node's digests and keeps no copy: a worker assigned a task over such an input gets
+`409` from the control plane and every chunk from the node. The digests are computed over the copy
+the node keeps, so the scientist may change the original file afterwards.
+
+A job may name one of the researcher's nodes as `output_holder` (A4). Only workers that serve peers
+(`serves_peers` at claim time) are given it; they keep their large outputs, declare their chunk
+digests and serve them, and the control plane refuses them as uploads above
+`node_relay_max_bytes` (0 by default: the server carries no data of such a run; a private
+deployment may allow small ones). The node lists what waits for it (`GET /node/pulls`), fetches each
+output from its producer with a ticket issued to the node, checks it, and declares it pulled; only
+then is the output no longer pending. An output not pulled within `pending_output_secs` closes its
+attempt as inconclusive (not paid, nobody sanctioned) and sends the task again.
+
+Validators read what the control plane does not store through peers (A5): the node's inputs, the
+outputs it pulled, with a ticket issued to the validator, each chunk checked against the signed
+manifest. Node-held inputs are prefetched the same way. When they cannot be read (the node
+offline), the validator decides nothing and releases the verification: a worker is never judged on
+an artifact nobody can serve.
+
+A graph run may name a node as `holder_node` (A6): the node draws the initial weights from the seed,
+averages each round's accepted gradients and applies the optimizer step with the coordinator's code,
+holds every checkpoint, and reports it; the server checks it against the run's shard plan and opens
+the next round. The server keeps the description only.
+
+The node is a program of its own, `gg-node`, installed as a user service by a signed installer
+(`deploy/node/install.sh`, like the worker's). It finds its servers in a list signed with the release
+key (`https://gpugoblin.com/servers.json`) and works only with a server that presents the key the
+list names. The Python library only needs its address (`gg.Client(..., node=...)`): datasets and
+starting weights go to the node, the node creates and steps the runs, and progress and trained
+weights are read from it. Its local API checks the researcher's token with the control plane,
+listens on the node's machine by default, and needs TLS to listen on the laboratory's network.
+
+A node belongs to a laboratory, not to one researcher (A7, step 1). Its owner grants other
+researchers the use of it. Each of them attaches it to their projects, and it works only for the
+attached projects. It cannot be detached while it still steps a run or pulls a job's outputs there.
+
+A node that keeps failing to pull an output (its producer gone, or serving bytes that do not match
+what it declared) gives up on it after `give_up_after`
+(`POST /node/artifacts/{hash}/unavailable`): the task is sent again at once, to another worker,
+with the same consequence as the deadline. It gains the node nothing it could not get by staying
+offline.
+
+| Claim | Evidence |
+|---|---|
+| A job over two node-held inputs is accepted; the assigned worker takes 3 of 3 chunks from the node and 0 from the control plane, which answers `409`; the peer list says the server holds no copy; a revoked node is no longer advertised and a reader then waits for peers and gets `409`, never a chunk from the server | `gg-node/tests/hold.rs` |
+| A worker that does not serve peers is not given a job a node holds; one that does has its 128 KiB output refused as an upload (relay limit set to 1 KiB) and serves it; the node pulls 2 of 2 chunks from the worker, holds the exact bytes, and nothing waits any more | `gg-node/tests/pull.rs` |
+| An output the node never pulls: past its deadline the task is sent to another worker (generation 2) and no longer offered to the node | `gg-node/tests/pull.rs` |
+| A real `gg-verifier` recomputes a task whose two inputs and output only the node holds, reads all three through peers and accepts it; with the node and the worker gone, it decides nothing, releases the verification, and the task stays submitted | `gg-node/tests/pull.rs` |
+| The node gives up on an output whose producer vanished after waiting its request timeout for peers (not falling back to a server that will never hold it); the task goes to another worker at once, never back to the same one | `gg-node/tests/pull.rs` |
+| Real binaries: `cargo xtask demo --kind matmul --node`: 12/12 tasks accepted in 3.9 s, 36/36 artifacts (24 inputs, 12 outputs) on the node, none in the control plane's object store, 120 chunks from peers and 0 from the control plane. With `--faults` (a worker corrupting its outputs, a peer serving corrupted chunks, an interrupted lease): 12/12 accepted in 47.5 s, no corrupted result paid | `cargo xtask demo --kind matmul --node [--faults]` |
+| A training run stepped by the node (3 rounds × 3 tasks, Adam, bf16 gradients, real `gg-verifier`): the node's checkpoint equals a single-process replay bit for bit; the server holds no copy | `gg-node/tests/train.rs` |
+| Real binaries: `cargo xtask demo --kind graph --node`: 10 rounds, 40/40 tasks accepted in 4.3 s (3.3 s when the server steps), checkpoint equal to the replay (largest difference 0), 82/82 artifacts on the node. With `--faults`: 18.8 s (17.1 s when the server steps) | `cargo xtask demo --kind graph --node [--faults]` |
+| A shared node: another researcher may attach it only once its owner allows him, and only to his own projects; the node holds for attached projects and for no other; withdrawing the grant keeps what was attached; detaching is refused while a job still sends it outputs, then accepted, after which the node no longer holds for that project and no job may name it | `gg-node/tests/share.rs` |
+| The installed node (`gg-node run`), through its local API only: datasets in, run created, round tasks by state, trained weights out, bit-exact against a replay; unknown or missing tokens refused, a project the caller is not a member of refused; a server presenting another key than the list names is not worked with | `gg-node/tests/train.rs` |
+| A node run starts from supplied weights (fine-tuning): step 0 is the bundle as it is, the result equals a replay from those weights; small gradients the server relayed are read from it | `gg-node/tests/train.rs` |
+| The signed list of servers: accepted only fresh, signed by a trusted key in its own namespace, not older than one accepted; `https` only | `gg-node` unit tests; by hand with `ssh-keygen -Y sign` (accepted; altered: refused; older, validly signed: refused) |
+| Installer: signature, digests, configuration, key, in a scratch home (`--no-start`) | `deploy/node/install.sh` against a local release signed with a test key |
+| The Python library through a real `gg-node`, a real control plane, 3 real workers and a real validator: 8 of the live tests pass (MLP, causal LM, RoPE, YaRN, `transformers` Llama and Mixtral, LSTM, Mamba) | `GG_NODE=http://127.0.0.1:7460 pytest tests/test_live.py` on a local grid (`gg-tools/live.sh`, P2P=1) |
+| The local API over TLS (a self-signed certificate, checked by `curl`); plain http refused on that port | by hand |
+| Reachability shared by worker and node (`gg_client::reach`): candidates in order (configured, IPv6, gateway mapping, bound, observed), a duplicate dropped, no mapping asked on loopback, the accepted address kept until the server refuses it | `gg-client` unit tests (`reach`) |
+| A node nobody can reach: its small artifacts are relayed by the server chunk by chunk (per-chunk ranges and whole downloads), the server keeps nothing, an artifact above the relay limit is not relayed (409), a node that stops answering gives the reader a 503. The relay is off by default (`node_relay_max_bytes = 0`) | `gg-node/tests/relay.rs` |
+| The reversed connection (A8 step 3): the node pushes its input to the worker that asked, over TLS pinned to the worker's key; the ticket shown to another reader is refused (403), a chunk not matching the manifest (422), a push without ticket (403); an address the server cannot dial back is skipped; nothing is stored on the server. A worker nobody can reach pushes its output to the node, which then holds it | `gg-node/tests/reverse.rs`, `gg-node/tests/pull.rs` |
+| Concurrent stores into the artifact cache never fail on each other's files (before the fix, 2 runs in 3 failed) | `gg-client/tests/cache.rs` |
+| A refused download keeps its status and message (`409`): before this fix it surfaced as a bare HTTP error, and a worker whose small input only a peer held failed its attempt instead of turning to peers | `gg-client/tests/download.rs` |
+| Only a member of the project declares into it (404 otherwise); a hash already held by another node is refused (409); only the holding node announces it (404); a chunk list that does not match the size is refused (422); a researcher token is not a node session | `gg-node/tests/hold.rs` |
 
 Sharing is opt-in (`[p2p] enabled = false` by default), bounded (connections, byte budget, announce
 TTL) and can be switched off on either side. Artifacts in use by an ongoing attempt are pinned in
@@ -591,7 +741,7 @@ fail the tasks the plan gave it with segments (ConvNeXt-tiny on 1.5 GB cards; no
 **Retention** (ADR-0040, 2026-09-25): a training run's intermediate artifacts (workers' outputs,
 micro-batch rows, superseded optimizer moments, weights of the checkpoints not kept) are removed once
 their round is settled for good (every task accepted, failed or cancelled, every verification
-decided, no dispute) and an hour has passed; step 0, every 50th checkpoint, the current one and every
+decided, no dispute) and ten minutes have passed; step 0, every 50th checkpoint, the current one and every
 researcher upload stay; while a run goes on, the round that produced its current checkpoint stays
 whole. Until now nothing was removed: about 2 GB per SmolLM2 round. Evidence: `gg-control --test
 collective` (`retention_removes_only_what_a_graph_run_no_longer_needs`, `…_staged_run_…`: the
@@ -674,7 +824,13 @@ contract and Wasm artifact) passes.
 - **Validation** is performed by authorized, administered validators under distinct operators. It
   is not trustless: collusion between operators is not addressed, and there are no automatic
   financial sanctions. The audit is a sample: a dishonest worker passes a given task with
-  probability `1 − audit_rate`.
+  probability `1 − audit_rate`. Verification by other contributors (ADR-0042) works for what the
+  server stores and for jobs a lab node holds, off by default. A colluding pair escapes the spot
+  checks with probability about `1 − spot_check_rate` per task once past probation; what a
+  suspended pair had accepted earlier is not recomputed automatically; a task waits as long as
+  fewer than two (three in probation) contributor accounts able to run it are online; a node that accepts wrong
+  results is not caught (it harms only its own run). The replica is paid as much as the first
+  computation (the owner's choice).
 - **Fault injection** is local worker configuration (`[dev_faults]`), refused in public mode, never
   remotely activatable. Likewise `sandbox = "none"` requires `dev_unsafe_no_isolation = true` and is
   refused in public mode.
@@ -688,6 +844,20 @@ contract and Wasm artifact) passes.
   restrictive NATs, no PCP, no relay, no discovery outside the tracker. NAT-PMP has never been
   confirmed on a real router; inbound IPv6 was not verifiable from the test network. Workers that
   cannot reach each other fall back to the control plane with no visible failure.
+- **Lab node (ADR-0041)**: milestones A1 to A6. The node steps data-parallel graph runs over
+  whole datasets or per-task rows it cuts itself, staged runs it cut into stages and tiled runs
+  it tiled (MLP runs are still stepped by the server); it keeps no state in memory between rounds and
+  applies no retention to its disk (the rows it cuts and the activations of staged rounds stay
+  there too). When one side of a transfer cannot be reached, the other is pushed to
+  (the reversed connection, A8 step 3). When neither can, nothing passes: hole punching (step 4)
+  is not done, and the server relay is off by default. A validator reads from an unreachable
+  holder only if it is given `push_listen`. The reversed connection has not been tried across a
+  real NAT; the tests run on loopback. The cutting (stages, tiles, micro-batch rows) is still the server's; the owner decided
+  it moves to the node. Its release is not yet part of the published release workflows (the
+  public repositories' CI files are hand-written); the TLS path of its API is checked by hand only. The demonstration runs the node inside `xtask`,
+  not as its own process. A worker whose output
+  the node never pulls is not paid for that attempt, even when the node was the one offline.
+  Reachability is the worker's first rung only: an address the control plane can dial back (A8).
 - **Resident weights (P11 D1) are not implemented**: each stage task downloads its stage's shards;
   the cache only helps for shards that did not change (frozen ones). Keeping trained weights resident
   would move the optimizer to the worker, which changes verification.
@@ -726,15 +896,37 @@ GPU deviation at K = 2048 for inputs in [-1, 1) and must be re-evaluated for oth
 
 ## Last full verification
 
-2026-09-24, on the development machine described above:
+2026-09-25, on the development machine described above:
 
 | Command | Result |
 |---|---|
-| `cargo xtask check` | fmt, clippy `-D warnings`, 352 tests passed, 0 failed; 2 ignored on purpose (the load test, run explicitly, and one timing measurement) |
+| `cargo xtask check` | fmt, clippy `-D warnings`, 436 tests passed, 0 failed; 2 ignored on purpose (the load test, run explicitly, and one timing measurement) |
+| `cargo xtask demo` with no option, `--faults`, `--kind matmul`, `--kind collective`, `--kind collective --faults`, `--kind collective --p2p --faults`, `--kind matmul --federated --faults`, `--kind graph`, `--kind graph --faults`, `--kind matmul --p2p --faults`, `--kind matmul --node`, `--kind matmul --node --faults`, `--kind graph --node`, `--kind graph --node --faults`, `--kind matmul --gpu --workers 1` | all 15 OK |
+| `GG_BIN=<path to gg> python -m pytest -q tests`, in gg-python | 262 passed; the live tests are skipped without a grid |
+| the live Python tests through a real `gg-node` (local grid, 3 workers, 1 validator, P2P) | 8 passed, 3 skipped |
+| after the cutting by the node (rows, stages, tiles): `cargo xtask check`; `cargo xtask demo --kind graph --node`, `--kind graph --node --faults`, `--kind matmul --node`, `--kind graph`, `--p2p`, `--kind collective --p2p --faults`; the Python tests | 401 tests passed; the 6 demos OK; Python 262 passed, 11 skipped (live tests without a grid). The live Python tests through a real node were not run again |
+| after the reversed connection (A8 step 3) and the relay turned off by default: `cargo xtask check`, then `cargo xtask demo --kind matmul --node`, `--kind graph --node`, `--kind matmul --node --faults`, `--kind graph --node --faults`, `--p2p`, `--kind matmul --p2p --faults` | 396 tests passed; the 6 demos OK. The 9 other demos and the Python tests were not run again after this change |
+
+Found while verifying (2026-09-25): a request cancelled while it opened a database transaction (its
+client gone) could hand its connection back to the pool still inside that transaction. sqlx 0.9 does
+not roll back a `begin()` dropped between sending `BEGIN` and counting it. Every later request on
+that connection then wrote into a transaction nobody committed, while answering success. It showed
+as a declared output that vanished (1 test run in 4). The pool now asks the server, when a
+connection comes back, whether it is inside a transaction block, and rolls it back
+(`gg-storage/tests/pool.rs` reproduces the leak and failed without the check).
+
+Also found: two demonstrations had been failing unnoticed.
+
+- `--kind graph` has failed since gradients travel in bf16 (ADR-0035): `gg job collective-check` replayed with f32 gradients. The replay now rounds each gradient as the workers do, and the published checkpoint matches it bit for bit (largest difference 0).
+- `--kind matmul --p2p --faults` never caught its lying peer: every job had its own inputs, so nobody needed what the liar held. In this mode, the jobs now share one matrix.
+
+The GPU and CUDA test suites and the live Python tests were not run again this time; their last results
+(2026-09-24) are below.
+
+| Command (2026-09-24) | Result |
+|---|---|
 | `cargo test -p gg-compute --features gpu --test gpu` (RTX 5060 Ti) | 19 passed |
 | `NVIDIA_TF32_OVERRIDE=0 LIBTORCH_USE_PYTORCH=1 cargo test -p gg-compute --features cuda --test cuda` (RTX 5060 Ti, LibTorch 2.9.0 cu128) | 3 passed |
-| `cargo xtask demo` with no option, `--faults`, `--kind matmul`, `--kind collective`, `--kind collective --faults`, `--kind collective --p2p --faults`, `--kind matmul --federated --faults`, `--kind graph`, `--kind graph --faults`, `--kind matmul --gpu --workers 1` | all OK |
-| `GG_BIN=<path to gg> python -m pytest -q tests`, in gg-python | 259 passed; the live tests are skipped without a grid |
 | the 10 live tests against a real server, validators and 1 to 4 workers (release build) | 10 passed (table above) |
 | a worker killed while it holds a task, Llama in 4 stages | the run completes; 22 s lost; same trained model |
 

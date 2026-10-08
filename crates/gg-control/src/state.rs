@@ -34,6 +34,8 @@ struct Inner {
     metrics: Metrics,
     signals: Signals,
     step_cache: crate::workflows::step_cache::StepCache,
+    relay: crate::workflows::relay::RelayHub,
+    push: crate::workflows::push::PushHub,
 }
 
 /// Wake-ups between the parts of the server. A wait (a worker's or validator's claim, a
@@ -48,6 +50,8 @@ pub struct Signals {
     pub verification: tokio::sync::Notify,
     /// The coordinator has something to examine (submission, decision).
     pub coordinator: tokio::sync::Notify,
+    /// A lab node may have something to do: an output declared, a step due (ADR-0041).
+    pub node: tokio::sync::Notify,
 }
 
 impl Signals {
@@ -113,6 +117,8 @@ impl AppState {
                 metrics: Metrics::default(),
                 signals: Signals::default(),
                 step_cache: crate::workflows::step_cache::StepCache::new(config_step_cache),
+                relay: crate::workflows::relay::RelayHub::default(),
+                push: crate::workflows::push::PushHub::default(),
             }),
         })
     }
@@ -120,6 +126,14 @@ impl AppState {
     /// Configuration.
     pub fn config(&self) -> &ServerConfig {
         &self.inner.config
+    }
+    /// Pushes asked of holders nobody can reach, for readers that can be reached (A8).
+    pub fn push(&self) -> &crate::workflows::push::PushHub {
+        &self.inner.push
+    }
+    /// Chunks relayed for lab nodes nobody can reach (ADR-0041, A8).
+    pub fn relay(&self) -> &crate::workflows::relay::RelayHub {
+        &self.inner.relay
     }
     /// Optimizer state kept between rounds (ADR-0036).
     pub fn step_cache(&self) -> &crate::workflows::step_cache::StepCache {
@@ -156,16 +170,23 @@ impl AppState {
     /// Tasks have become claimable.
     pub fn signal_work(&self) {
         self.inner.signals.work.notify_waiters();
+        self.inner.signals.node.notify_waiters();
+    }
+    /// An output was declared for a lab node, or a step may be due (ADR-0041).
+    pub fn signal_node(&self) {
+        self.inner.signals.node.notify_waiters();
     }
     /// A submission is recorded: a verification is available and the coordinator must be woken.
     pub fn signal_submission(&self) {
         self.inner.signals.verification.notify_waiters();
         self.inner.signals.coordinator.notify_one();
+        self.inner.signals.node.notify_waiters();
     }
     /// A decision is recorded: the coordinator must be woken; a rejected task goes back in the queue;
     /// an engine check may have been opened (ADR-0031).
     pub fn signal_decision(&self) {
         self.inner.signals.coordinator.notify_one();
+        self.inner.signals.node.notify_waiters();
         self.inner.signals.work.notify_waiters();
         self.inner.signals.verification.notify_waiters();
     }

@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod common;
+pub mod node;
 pub mod researcher;
 pub mod validator;
 pub mod worker;
@@ -37,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .merge(researcher::json_routes())
         .merge(worker::json_routes())
         .merge(validator::json_routes())
+        .merge(node::json_routes())
         .merge(admin::routes())
         .split_for_parts();
     let json_routes = json_routes.layer(RequestBodyLimitLayer::new(json_limit));
@@ -45,6 +47,7 @@ pub fn router(state: AppState) -> Router {
         .merge(researcher::upload_routes())
         .merge(worker::upload_routes())
         .merge(validator::upload_routes())
+        .merge(node::stream_routes())
         .layer(RequestBodyLimitLayer::new(upload_limit));
 
     let doc = std::sync::Arc::new(api);

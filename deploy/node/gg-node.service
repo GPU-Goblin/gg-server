@@ -1,0 +1,25 @@
+# GPU Goblin lab node, as a systemd USER service (no root). install.sh puts it in
+# ~/.config/systemd/user/gg-node.service; manage it with:
+#   systemctl --user status|restart|stop gg-node
+#   journalctl --user -u gg-node -f
+# To keep it running while you are logged out: loginctl enable-linger "$USER"
+[Unit]
+Description=GPU Goblin lab node (gg-node)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=%h/.local/lib/gpu-goblin-node/current/gg-node --config %E/gpu-goblin/node.toml run
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=30s
+Environment=RUST_LOG=info
+# The node runs no one else's code: it stores, hashes, averages and serves bytes. (Namespace-based
+# hardening is left out: a user service cannot always create namespaces, and would not start.)
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

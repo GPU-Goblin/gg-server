@@ -44,6 +44,10 @@ pub enum ApiError {
     /// 500 (details logged, not returned).
     #[error("internal error: {0}")]
     Internal(String),
+    /// 503: what the request needs is not available right now (a lab node that does not answer);
+    /// the same request can be tried again later.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     /// 503: the database aborted the transaction to resolve a deadlock or a serialization
     /// conflict. Nothing was written; the same request can be replayed as is.
     #[error("retryable: {0}")]
@@ -85,6 +89,7 @@ impl ApiError {
                 "internal",
                 "internal error".into(),
             ),
+            ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", m.clone()),
             ApiError::Retryable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "retry",

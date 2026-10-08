@@ -921,6 +921,12 @@ pub struct ResearcherInfo {
     /// Verified e-mail address, when the researcher signed in by e-mail.
     pub email: Option<String>,
     pub admission: String,
+    /// Laboratory given with an access request from the public site.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lab: Option<String>,
+    /// What they want to compute, given with that request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 
 #[utoipa::path(get, path = "/admin/researchers", tag = "admin", responses((status = 200, body = Vec<ResearcherInfo>)))]
@@ -936,14 +942,20 @@ async fn list_researchers(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let rows = identities::list_researchers(&mut c).await?;
     let mut emails = identities::researcher_emails(&mut c).await?;
+    let mut requests = identities::access_requests(&mut c).await?;
     Ok(Json(
         rows.into_iter()
-            .map(|r| ResearcherInfo {
-                researcher_id: ResearcherId(r.id),
-                display_name: r.display_name,
-                orcid: r.orcid,
-                email: emails.remove(&r.id),
-                admission: r.admission_state,
+            .map(|r| {
+                let request = requests.remove(&r.id);
+                ResearcherInfo {
+                    researcher_id: ResearcherId(r.id),
+                    display_name: r.display_name,
+                    orcid: r.orcid,
+                    email: emails.remove(&r.id),
+                    admission: r.admission_state,
+                    lab: request.as_ref().map(|q| q.0.clone()),
+                    purpose: request.map(|q| q.1),
+                }
             })
             .collect(),
     ))

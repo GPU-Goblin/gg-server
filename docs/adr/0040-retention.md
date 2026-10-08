@@ -21,7 +21,8 @@ fills 2 TB. A beta server would fill its disk within days of real use.
   - Neither do a plain job's results, or a release.
 - **A round is examined once it is settled for good.** All of the following must hold:
   - it is closed (aggregated or failed);
-  - `retention_after_secs` have passed (3600 by default);
+  - `retention_after_secs` have passed (600 by default: at 2 GB per SmolLM2 round and 12 to 60 s per
+    round, an hour would hold 120 to 600 GB);
   - every task is accepted, failed or cancelled (a rejected or inconclusive task may still be
     retried, a disputed one awaits a human);
   - every verification is decided, audits and engine checks included;
@@ -40,7 +41,7 @@ fills 2 TB. A beta server would fill its disk within days of real use.
   answers that it expired, by name. Storing the same bytes again later revives it.
 - **The order of removal.** The row is marked expired before the bytes are deleted, so the database
   never names a live object that is gone. A server pass runs every `retention_interval_secs`
-  (300 s). `retention = false` keeps everything.
+  (60 s). `retention = false` keeps everything.
 
 ## Consequences
 

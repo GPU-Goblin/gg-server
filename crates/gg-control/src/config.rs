@@ -27,6 +27,29 @@ pub struct ServerConfig {
     /// Time a producer has to send the durable copy of an activation it declared before (ADR-0026);
     /// past it, the staged round that passed the activation on is reissued.
     pub pending_output_secs: i64,
+    /// Largest artifact of a run a lab node holds that the control plane carries itself: a small
+    /// output a worker uploads instead of serving it, a chunk relayed for a node nobody can reach.
+    /// 0 (the default, the owner's choice of 2026-09-25): none, the server carries no data of such
+    /// a run; a private deployment may allow some.
+    pub node_relay_max_bytes: u64,
+    /// How long a reader waits for a lab node to send one relayed chunk before being told to
+    /// retry (A8).
+    pub node_relay_wait_secs: u64,
+    /// Verification by other contributors (ADR-0042): every task is computed a second time by a
+    /// worker of another contributor account, drawn by the server, and the two results are
+    /// compared instead of being recomputed by a validator. Off by default while the ADR's plan is
+    /// under way.
+    pub replica_verification: bool,
+    /// How long the worker drawn for a replica is alone to be offered it (ADR-0042); any worker of
+    /// another account afterwards.
+    pub pairing_reserve_secs: u64,
+    /// Share of the replicated tasks that get a third computation from the start, whatever the first
+    /// two say (ADR-0042 spot checks, 5 % decided by the owner on 2026-09-26). Drawn with the
+    /// server's secret.
+    pub spot_check_rate: f64,
+    /// Accepted computations after which an account leaves probation: until then every task it
+    /// computes is spot-checked (ADR-0042, 20 decided by the owner on 2026-09-26).
+    pub probation_tasks: u32,
     /// Maximum long-poll wait for claims.
     pub claim_wait_max_secs: u64,
     /// Maximum upload size in bytes.
@@ -275,6 +298,12 @@ impl Default for ServerConfig {
             lease_max_secs: 3600,
             verification_lease_secs: 600,
             pending_output_secs: 600,
+            node_relay_max_bytes: 0,
+            node_relay_wait_secs: 30,
+            replica_verification: false,
+            pairing_reserve_secs: 30,
+            spot_check_rate: 0.05,
+            probation_tasks: 20,
             claim_wait_max_secs: 30,
             max_upload_bytes: 1 << 30,
             max_json_bytes: 1 << 20,
@@ -307,9 +336,9 @@ impl Default for ServerConfig {
             engine_check_rate: 0.1,
             step_cache_bytes: 4 << 30,
             retention: true,
-            retention_after_secs: 3600,
+            retention_after_secs: 600,
             checkpoint_keep_every: 50,
-            retention_interval_secs: 300,
+            retention_interval_secs: 60,
             project_initial_grant: 0,
         }
     }
@@ -371,6 +400,9 @@ impl ServerConfig {
         if let Some(v) = env("GG_PENDING_OUTPUT_SECS").and_then(|v| v.parse().ok()) {
             self.pending_output_secs = v;
         }
+        if let Some(v) = env("GG_NODE_RELAY_MAX_BYTES").and_then(|v| v.parse().ok()) {
+            self.node_relay_max_bytes = v;
+        }
         if let Some(v) = env("GG_LEASE_SECS").and_then(|v| v.parse().ok()) {
             self.lease_secs = v;
         }
@@ -391,6 +423,9 @@ impl ServerConfig {
         }
         if let Some(v) = env("GG_ENGINE_CHECK_RATE").and_then(|v| v.parse().ok()) {
             self.engine_check_rate = v;
+        }
+        if let Some(v) = env("GG_REPLICA_VERIFICATION") {
+            self.replica_verification = matches!(v.as_str(), "1" | "true" | "yes");
         }
         if let Some(v) = env("GG_STEP_CACHE_BYTES").and_then(|v| v.parse().ok()) {
             self.step_cache_bytes = v;
@@ -479,6 +514,9 @@ impl ServerConfig {
         }
         if !(0.0..=1.0).contains(&self.audit_rate) || !self.audit_rate.is_finite() {
             return Err("audit_rate must be between 0 and 1".into());
+        }
+        if !(0.0..=1.0).contains(&self.spot_check_rate) || !self.spot_check_rate.is_finite() {
+            return Err("spot_check_rate must be between 0 and 1".into());
         }
         if !(0.0..=1.0).contains(&self.engine_check_rate) || !self.engine_check_rate.is_finite() {
             return Err("engine_check_rate must be between 0 and 1".into());

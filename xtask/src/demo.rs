@@ -36,6 +36,17 @@ pub struct DemoArgs {
     /// corrupted chunks and must be caught.
     #[arg(long)]
     pub p2p: bool,
+    /// Lab node (ADR-0041; `--kind matmul` or `graph`, implies `--p2p`): a node on the
+    /// researcher's side holds the inputs, pulls the outputs from the workers, and validators read
+    /// both through peers; for `graph`, it also draws the weights and applies every optimizer
+    /// step. The control plane stores none of them.
+    #[arg(long)]
+    pub node: bool,
+    /// Verification by other contributors (ADR-0042): every task computed again by another
+    /// account (each demo worker is its own), compared; with the default probation, every task
+    /// gets a third computation too. Validators then have nothing to recompute.
+    #[arg(long)]
+    pub replicas: bool,
     /// Number of honest CPU workers.
     #[arg(long, default_value_t = 3)]
     pub workers: u32,
@@ -51,6 +62,11 @@ pub struct DemoArgs {
     /// Overall timeout in seconds (starts after the build).
     #[arg(long, default_value_t = 300)]
     pub timeout_secs: u64,
+    /// Wait for this many workers started elsewhere (a virtual machine reaching this one through
+    /// a relay to the loopback port) to register themselves, and authorize them; they take tasks
+    /// like the local ones. The demo prints the port and network they need.
+    #[arg(long, default_value_t = 0)]
+    pub external_workers: u32,
 }
 
 struct Procs {
@@ -171,7 +187,7 @@ fn write_worker_config(
     if p2p {
         // Single host: peers are loopback, so the local policy must allow private addresses.
         text.push_str(
-            "\n[p2p]\nenabled = true\nshare = true\nlisten_addr = \"127.0.0.1:0\"\nallow_private_peers = true\nmax_peers = 8\nmax_upload_conns = 8\nnat_pmp = false\n# The demo artifacts are smaller than 1 MiB: without this lowered threshold, a worker would\n# fetch them straight from the control plane, and peer-to-peer would not be exercised.\nmin_bytes = 0\n",
+            "\n[p2p]\nenabled = true\nshare = true\nlisten_addr = \"127.0.0.1:0\"\nallow_private_peers = true\nmax_peers = 8\nmax_upload_conns = 8\nnat_pmp = false\nupnp = false\n# The demo artifacts are smaller than 1 MiB: without this lowered threshold, a worker would\n# fetch them straight from the control plane, and peer-to-peer would not be exercised.\nmin_bytes = 0\n",
         );
     }
     if let Some(f) = faults {
@@ -181,7 +197,98 @@ fn write_worker_config(
     Ok(())
 }
 
-pub fn run(args: DemoArgs) -> anyhow::Result<()> {
+/// The researcher's lab node, run in this process (ADR-0041).
+struct Lab {
+    rt: tokio::runtime::Runtime,
+    node: std::sync::Arc<gg_node::Node>,
+    stop: tokio::sync::watch::Sender<bool>,
+}
+
+fn start_lab(
+    server: &str,
+    researcher_token: &str,
+    project: &str,
+    dir: &Path,
+    log: &Path,
+) -> anyhow::Result<Lab> {
+    // The node runs in this process: its log goes to its own file, like the other processes'.
+    let file = std::fs::File::create(log)?;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("gg_node=debug,gg_client=info")
+        .with_writer(std::sync::Mutex::new(file))
+        .with_ansi(false)
+        .try_init();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let key = gg_protocol::keys::SecretKey::generate()?;
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{server}/v1/researcher/nodes"))
+        .bearer_auth(researcher_token)
+        .json(&json!({ "public_key": key.public_key().to_hex(), "name": "demo-lab" }))
+        .send()?;
+    anyhow::ensure!(
+        r.status().is_success(),
+        "register the lab node: {}",
+        r.text()?
+    );
+    // The node works for the projects attached to it (ADR-0041, A7).
+    let node: Value = r.json()?;
+    let a = reqwest::blocking::Client::new()
+        .post(format!("{server}/v1/researcher/projects/{project}/nodes"))
+        .bearer_auth(researcher_token)
+        .json(&json!({ "node_id": node["node_id"] }))
+        .send()?;
+    anyhow::ensure!(
+        a.status().is_success(),
+        "attach the lab node: {}",
+        a.text()?
+    );
+    let node = rt.block_on(gg_node::Node::start(
+        gg_node::NodeConfig {
+            server_url: server.to_owned(),
+            allow_plain_http: true,
+            state_dir: dir.to_path_buf(),
+            listen_addr: "127.0.0.1:0".into(),
+            reach: Default::default(),
+            max_conns: 16,
+            allow_private_peers: true,
+            // A producer that serves wrong bytes (`--faults`) has its task sent again soon.
+            give_up_after: Duration::from_secs(10),
+            expect: None,
+        },
+        key,
+    ))?;
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    rt.spawn(
+        node.clone()
+            .keep_pulling(Duration::from_millis(20), rx.clone()),
+    );
+    rt.spawn(
+        node.clone()
+            .keep_stepping(Duration::from_secs(1), rx.clone()),
+    );
+    rt.spawn(
+        node.clone()
+            .keep_relaying(Duration::from_secs(1), rx.clone()),
+    );
+    // Comparisons of computations, when the server replicates them (ADR-0042).
+    rt.spawn(
+        node.clone()
+            .keep_comparing(Duration::from_secs(1), rx.clone()),
+    );
+    rt.spawn(node.clone().keep_announcing(Duration::from_secs(60), rx));
+    Ok(Lab { rt, node, stop })
+}
+
+pub fn run(mut args: DemoArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !args.node || args.kind == "matmul" || args.kind == "graph",
+        "--node runs with --kind matmul or --kind graph"
+    );
+    // The node's artifacts travel between peers only.
+    args.p2p |= args.node;
     anyhow::ensure!(
         args.kind == "mlp"
             || args.kind == "matmul"
@@ -274,8 +381,17 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
         )
         // Small chunks so the demo exercises multi-chunk transfers on modest artifacts.
         .env("GG_P2P_CHUNK_BYTES", "65536")
+        // With a lab node, every output goes to it: the control plane relays none.
+        .env(
+            "GG_NODE_RELAY_MAX_BYTES",
+            if args.node { "0" } else { "67108864" },
+        )
         // Federated validation: audit every submission so the demonstration is deterministic.
         .env("GG_AUDIT_RATE", if args.federated { "1.0" } else { "0" })
+        .env(
+            "GG_REPLICA_VERIFICATION",
+            if args.replicas { "1" } else { "0" },
+        )
         .env("RUST_LOG", "info,sqlx=warn");
     procs.spawn("gg-server", cmd, &logs.join("server.log"))?;
     wait_health(&server, Duration::from_secs(30))?;
@@ -406,7 +522,12 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
         std::fs::write(&cfg, text)?;
         let mut cmd = Command::new(bin("gg-verifier"));
         cmd.args(["--config", cfg.to_str().unwrap(), "run"])
-            .env("RUST_LOG", "info");
+            .env("RUST_LOG", "info")
+            // What a lab node holds is read through peers, here on this machine.
+            .env(
+                "GG_VERIFIER_ALLOW_PRIVATE_PEERS",
+                if args.p2p { "1" } else { "0" },
+            );
         procs.spawn(name, cmd, &logs.join(format!("{name}.log")))?;
         println!(
             "  {name}: operator {operator}{}",
@@ -430,6 +551,21 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
 
     let data = root.join("data");
     std::fs::create_dir_all(&data)?;
+    let lab = if args.node {
+        println!("-- lab node (holds the inputs, pulls the outputs)");
+        let lab = start_lab(
+            &server,
+            &researcher_token,
+            &project,
+            &root.join("node"),
+            &logs.join("node.log"),
+        )?;
+        println!("  node {}", lab.node.id());
+        Some(lab)
+    } else {
+        None
+    };
+    let mut node_inputs: Vec<gg_core::Sha256Digest> = Vec::new();
     let mut jobs: Vec<String> = Vec::new();
     let mut expected_tasks = 0usize;
     let kind_id: &str;
@@ -514,38 +650,82 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
         let rounds = args.rounds.to_string();
         let x = format!("x={}", data.join("train_x.ggt").display());
         let y = format!("y={}", data.join("train_y.ggt").display());
-        let r = gg(
-            &server,
-            &researcher_token,
-            &[
-                "job",
-                "collective",
-                "--project",
-                &project,
-                "--name",
-                "demo-graphe",
-                "--graph",
-                graph_path.to_str().unwrap(),
-                "--dataset",
-                &x,
-                "--dataset",
-                &y,
-                "--optimizer",
-                "adam",
-                "--lr",
-                "0.02",
-                "--batch",
-                "256",
-                "--tasks",
-                "4",
-                "--rounds",
-                &rounds,
-                "--seed",
-                "1",
-                "--retries",
-                "2",
-            ],
-        )?;
+        let r = if let Some(lab) = &lab {
+            // The description is small and stays on the server; the datasets stay on the node,
+            // which draws the weights and steps the run.
+            let graph_bytes = std::fs::read(&graph_path)?;
+            let graph_hash = gg_core::Sha256Digest::of_bytes(&graph_bytes);
+            let http = reqwest::blocking::Client::new();
+            let up = http
+                .put(format!(
+                    "{server}/v1/researcher/projects/{project}/artifacts/{graph_hash}?size={}&schema=gg-graph-v1",
+                    graph_bytes.len()
+                ))
+                .bearer_auth(&researcher_token)
+                .body(graph_bytes.clone())
+                .send()?;
+            anyhow::ensure!(
+                up.status().is_success(),
+                "upload the description: {}",
+                up.text()?
+            );
+            let project_id = gg_core::ProjectId(project.parse()?);
+            let hold = |f: &str| {
+                lab.rt
+                    .block_on(lab.node.hold(project_id, &data.join(f), "ggt1-f32"))
+            };
+            let (rx, ry) = (hold("train_x.ggt")?, hold("train_y.ggt")?);
+            node_inputs.extend([rx.hash, ry.hash]);
+            let r = http
+                .post(format!(
+                    "{server}/v1/researcher/projects/{project}/collective"
+                ))
+                .bearer_auth(&researcher_token)
+                .json(&json!({
+                    "name": "demo-graphe",
+                    "graph": { "hash": graph_hash, "size": graph_bytes.len() },
+                    "datasets": { "x": rx, "y": ry },
+                    "optimizer": "adam", "learning_rate": 0.02, "batch_per_round": 256,
+                    "tasks_per_round": 4, "rounds": args.rounds, "seed": 1,
+                    "max_round_retries": 2, "holder_node": lab.node.id(),
+                }))
+                .send()?;
+            anyhow::ensure!(r.status().is_success(), "create the run: {}", r.text()?);
+            r.json::<Value>()?
+        } else {
+            gg(
+                &server,
+                &researcher_token,
+                &[
+                    "job",
+                    "collective",
+                    "--project",
+                    &project,
+                    "--name",
+                    "demo-graphe",
+                    "--graph",
+                    graph_path.to_str().unwrap(),
+                    "--dataset",
+                    &x,
+                    "--dataset",
+                    &y,
+                    "--optimizer",
+                    "adam",
+                    "--lr",
+                    "0.02",
+                    "--batch",
+                    "256",
+                    "--tasks",
+                    "4",
+                    "--rounds",
+                    &rounds,
+                    "--seed",
+                    "1",
+                    "--retries",
+                    "2",
+                ],
+            )?
+        };
         let id = r["run_id"].as_str().unwrap().to_owned();
         println!(
             "  run {id}: {} parameters, state {} step {}/{}",
@@ -699,7 +879,7 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
         );
         for i in 0..args.jobs {
             let a = data.join(format!("a{i}.ggt"));
-            let b = data.join(format!("b{i}.ggt"));
+            let mut b = data.join(format!("b{i}.ggt"));
             let d = args.dim.to_string();
             gg_text(
                 &server,
@@ -721,6 +901,30 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
                     b.to_str().unwrap(),
                 ],
             )?;
+            // With peers, every job multiplies by the same `b`: workers then fetch the same
+            // artifact, from each other, and the lying peer (`--faults`) is really asked for it.
+            if args.p2p && !args.node && i > 0 {
+                b = data.join("b0.ggt");
+            }
+            if let Some(lab) = &lab {
+                // The node holds the inputs and pulls the outputs; the job names it.
+                let project_id = gg_core::ProjectId(project.parse()?);
+                let ra = lab.rt.block_on(lab.node.hold(project_id, &a, "ggt1-f32"))?;
+                let rb = lab.rt.block_on(lab.node.hold(project_id, &b, "ggt1-f32"))?;
+                node_inputs.extend([ra.hash, rb.hash]);
+                let def =
+                    gg_compute::catalog::matmul_definition(args.dim, args.dim, args.dim, ra, rb)?;
+                let r = reqwest::blocking::Client::new()
+                    .post(format!("{server}/v1/researcher/projects/{project}/jobs"))
+                    .bearer_auth(&researcher_token)
+                    .json(&json!({ "name": format!("matmul-{i}"), "tasks": [def], "output_holder": lab.node.id() }))
+                    .send()?;
+                anyhow::ensure!(r.status().is_success(), "submit: {}", r.text()?);
+                let j: Value = r.json()?;
+                jobs.push(j["job_id"].as_str().unwrap().to_owned());
+                expected_tasks += 1;
+                continue;
+            }
             let key = format!("demo-{stamp}-{i}");
             let argv = [
                 "job",
@@ -747,6 +951,8 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
             expected_tasks += 1;
         }
         println!("  submitted {} jobs", jobs.len());
+    }
+    if args.kind == "matmul" && lab.is_none() {
         let dry = gg(
             &server,
             &researcher_token,
@@ -776,7 +982,13 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
             let dir = root.join(name);
             std::fs::create_dir_all(&dir)?;
             let cfg = dir.join("worker.toml");
-            write_worker_config(&cfg, &dir, &server, name, engine, kind_id, faults, args.p2p)?;
+            // With replicas, workers also compare two computations when a lab node asks for it.
+            let kinds = if args.replicas {
+                format!("{kind_id}\", \"replica.compare.v1")
+            } else {
+                kind_id.to_owned()
+            };
+            write_worker_config(&cfg, &dir, &server, name, engine, &kinds, faults, args.p2p)?;
             let out = Command::new(&worker_bin)
                 .args(["--config", cfg.to_str().unwrap(), "init"])
                 .output()?;
@@ -957,6 +1169,26 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
         let name = format!("worker-{i}");
         start_worker(&mut procs, &name, Some("replay_submission = true"))?;
         worker_names.push(name);
+    }
+    if args.external_workers > 0 {
+        println!(
+            "-- waiting for {} external worker(s): port {port}, network {network}",
+            args.external_workers
+        );
+        let mut external = std::collections::BTreeSet::new();
+        while external.len() < args.external_workers as usize {
+            check_deadline("waiting for external workers")?;
+            let list = gg(&server, &admin, &["admin", "worker-list"])?;
+            for w in list.as_array().cloned().unwrap_or_default() {
+                if w["authorized"] == false {
+                    let id = w["worker_id"].as_str().unwrap_or_default().to_owned();
+                    gg(&server, &admin, &["admin", "worker-authorize", &id])?;
+                    println!("  external {}: id {id} authorized", w["display_name"]);
+                    external.insert(id);
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
     }
 
     let mut run_view = Value::Null;
@@ -1161,11 +1393,14 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
             && (cancelled_tasks == 0 || cancelled_job.is_some()),
         format!("{accepted_tasks}/{expected_tasks} (+{cancelled_tasks} cancelled with the job)"),
     );
+    // With replicas, one receipt per accepted computation: two or three per task (ADR-0042).
+    let per_task = if args.replicas { 2..=3 } else { 1..=1 };
     push(
-        "one_receipt_per_task",
-        receipts.len() == accepted_tasks,
+        "one_receipt_per_computation",
+        receipts.len() >= accepted_tasks * per_task.start()
+            && receipts.len() <= accepted_tasks * per_task.end(),
         format!(
-            "{} receipts for {accepted_tasks} accepted tasks (replays created none)",
+            "{} receipts for {accepted_tasks} accepted tasks, {per_task:?} computations each (replays created none)",
             receipts.len()
         ),
     );
@@ -1196,6 +1431,12 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
         for i in &collective_inputs {
             argv.push("--input");
             argv.push(i);
+        }
+        // A run the lab node stepped: its checkpoint and datasets are read from the node's store.
+        let store = root.join("node").join("store");
+        let store = store.to_string_lossy().into_owned();
+        if lab.is_some() {
+            argv.extend(["--store", &store]);
         }
         equivalence = match gg_text(&server, &researcher_token, &argv) {
             Ok(t) => t,
@@ -1270,7 +1511,9 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
                 .unwrap_or(0)
         })
         .sum::<u64>()
-        * 2;
+        // A validator's recomputation is charged like the computation; with replicas, the other
+        // computations are the verification, each paid its own receipt (ADR-0042).
+        * if args.replicas { 1 } else { 2 };
     push(
         "ledger_spent_matches_receipts",
         spent == expected_spent,
@@ -1425,11 +1668,66 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
             );
         }
     }
-    push(
-        "replayed_submissions_not_recorded_twice",
-        wlogs.contains("recorded=false same_hash=true"),
-        "worker logs show idempotent replay answers".into(),
-    );
+    if let Some(lab) = &lab {
+        let outputs: Vec<gg_core::Sha256Digest> = receipts
+            .iter()
+            .flat_map(|r| {
+                r["receipt"]["body"]["output_hashes"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|h| h.as_str().and_then(|s| s.parse().ok()))
+            .collect();
+        let all: Vec<gg_core::Sha256Digest> =
+            node_inputs.iter().chain(outputs.iter()).copied().collect();
+        let held = all
+            .iter()
+            .filter(|h| lab.rt.block_on(lab.node.holds(h)))
+            .count();
+        push(
+            "node_holds_inputs_and_outputs",
+            !outputs.is_empty() && held == all.len(),
+            format!(
+                "{held}/{} artifacts ({} inputs, {} outputs) held by the lab node",
+                all.len(),
+                node_inputs.len(),
+                outputs.len()
+            ),
+        );
+        let mut stored = std::collections::HashSet::new();
+        let mut stack = vec![server_dir.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d)?.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                    stored.insert(n.to_owned());
+                }
+            }
+        }
+        let on_server = all.iter().filter(|h| stored.contains(&h.to_hex())).count();
+        push(
+            "server_stores_no_node_artifact",
+            on_server == 0,
+            format!("{on_server} of them in the control plane's object store"),
+        );
+        let vlog = std::fs::read_to_string(logs.join("gg-verifier.log")).unwrap_or_default();
+        push(
+            "validator_read_through_peers",
+            vlog.contains("read through peers") || vlog.contains("input prefetched"),
+            "the validator recomputed from artifacts only peers hold".into(),
+        );
+    }
+    // Only the demo's own workers replay their submissions (external workers run as configured).
+    if args.workers > 0 {
+        push(
+            "replayed_submissions_not_recorded_twice",
+            wlogs.contains("recorded=false same_hash=true"),
+            "worker logs show idempotent replay answers".into(),
+        );
+    }
 
     let report = json!({
         "started_unix": stamp,
@@ -1460,6 +1758,10 @@ pub fn run(args: DemoArgs) -> anyhow::Result<()> {
     )?;
     println!("-- report: {}", root.join("report.json").display());
     drop(procs);
+    if let Some(lab) = lab {
+        let _ = lab.stop.send(true);
+        lab.rt.block_on(lab.node.stop());
+    }
     anyhow::ensure!(ok, "demo checks failed (see report)");
     println!("== demo OK ({:.1}s) ==", started.elapsed().as_secs_f64());
     Ok(())

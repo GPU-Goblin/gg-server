@@ -224,6 +224,10 @@ async fn new_job(
         &format!("{}-round{step}-a{attempt}-wave{wave}-m{micro}", run.name),
     )
     .await?;
+    // A run a lab node steps: every output (activations included) is the node's to hold.
+    if let Some(node) = run.holder_node {
+        jobs::set_output_holder(tx, job_id, NodeId(node)).await?;
+    }
     Ok(job_id)
 }
 
@@ -245,7 +249,28 @@ pub(crate) async fn open_round(
     let r = resolved(state, g).await?;
     let seed = round_seed(cfg, step);
     let mut st = StageState::default();
-    for (start, count) in slices(cfg.batch_per_round, cfg.tasks_per_round) {
+    // A lab node's run: the node cut every micro-batch's rows; the server reads none.
+    let node_rows = match run.holder_node {
+        Some(_) => Some(super::node_step::rows_of(tx, run.id, step).await?),
+        None => None,
+    };
+    for (i, (start, count)) in slices(cfg.batch_per_round, cfg.tasks_per_round)
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(rows) = &node_rows {
+            let data = rows
+                .get(i)
+                .cloned()
+                .ok_or_else(|| ApiError::Internal(format!("no rows for micro-batch {i}")))?;
+            st.micro.push(Micro {
+                start,
+                count,
+                data,
+                ..Micro::default()
+            });
+            continue;
+        }
         let idx = gg_compute::graph::task::round_indices(seed, cfg.total_examples, start, count);
         let mut data = BTreeMap::new();
         for d in &g.datasets {
@@ -514,9 +539,11 @@ pub(crate) async fn advance(
         return Ok(false);
     }
 
-    // Every wave recorded: wait until every verification has accepted.
+    // Every wave recorded: wait until every verification has accepted. A lab node steps its own
+    // run (ADR-0041): it is told the step is due (`node_parts`).
     if !task_states.iter().all(|s| *s == TaskState::Accepted)
         || !recorded.iter().all(|(_, s)| s == "accepted")
+        || run.holder_node.is_some()
     {
         tx.rollback().await?;
         return Ok(false);
@@ -648,4 +675,40 @@ async fn shard_parts(
         parts.push((count, sum));
     }
     Ok(parts)
+}
+
+/// For a staged round of a run a lab node steps: once every wave of every micro-batch is recorded
+/// and every task and passed-on attempt accepted, each micro-batch's example count and parameter
+/// gradient bundles in production order (the node sums a shard's partial gradients in that
+/// order, as [`shard_parts`] does). `None` before.
+pub(crate) async fn node_parts(
+    c: &mut gg_storage::PgConnection,
+    round: &cq::CollectiveRoundRow,
+    stages: usize,
+) -> Result<Option<Vec<(u32, Vec<(String, ArtifactRef)>)>>, ApiError> {
+    let Some(json) = cq::stage_state(c, round.id).await? else {
+        return Ok(None);
+    };
+    let st: StageState =
+        serde_json::from_value(json).map_err(|e| ApiError::Internal(e.to_string()))?;
+    if st.micro.is_empty() || st.micro.iter().any(|m| m.wave < 2 * stages) {
+        return Ok(None);
+    }
+    for j in st.jobs() {
+        for t in jobs::list_tasks(c, JobId(j)).await? {
+            if t.task_state()
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+                != TaskState::Accepted
+            {
+                return Ok(None);
+            }
+        }
+    }
+    let recorded = tasks::attempt_states(c, &st.recorded).await?;
+    if recorded.len() != st.recorded.len() || !recorded.iter().all(|(_, s)| s == "accepted") {
+        return Ok(None);
+    }
+    Ok(Some(
+        st.micro.into_iter().map(|m| (m.count, m.grads)).collect(),
+    ))
 }

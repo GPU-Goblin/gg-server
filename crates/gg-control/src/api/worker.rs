@@ -10,7 +10,7 @@ use gg_core::*;
 use gg_protocol::keys::PublicKey;
 use gg_protocol::messages::{LoginChallengeV1, ResultSubmissionV1};
 use gg_protocol::signed::Signed;
-use gg_storage::queries::{identities, jobs, pending, tasks};
+use gg_storage::queries::{artifacts, identities, jobs, pending, tasks};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -99,6 +99,8 @@ pub struct WorkerMe {
     pub public_key: String,
     pub authorized: bool,
     pub earned: Credits,
+    /// Computations of this worker the grid accepted (receipts).
+    pub accepted: u64,
     pub active_attempts: Vec<AttemptId>,
     /// Source address the control plane sees for this worker. A worker whose NAT preserves the port
     /// (or that has a port forward) can announce `observed_ip:local_port` instead of guessing its
@@ -119,6 +121,11 @@ async fn me(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let earned = gg_ledger::worker_earned(&mut c, w.id).await?;
+    let accepted: i64 = sqlx::query_scalar("SELECT count(*) FROM receipts WHERE worker_id = $1")
+        .bind(w.id.0)
+        .fetch_one(&mut *c)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let active = tasks::list_active_attempts_of_worker(&mut c, w.id)
         .await?
         .into_iter()
@@ -129,6 +136,7 @@ async fn me(
         public_key: w.key.to_hex(),
         authorized: true,
         earned,
+        accepted: accepted.max(0) as u64,
         active_attempts: active,
         observed_ip: peer.to_string(),
     }))
@@ -197,6 +205,10 @@ pub struct ClaimRequest {
     /// most the configured length), so that a worker that vanishes is replaced quickly.
     #[serde(default)]
     pub heartbeat_secs: Option<u64>,
+    /// The worker keeps its outputs and serves them to peers: it may take tasks whose outputs a
+    /// lab node pulls (ADR-0041). Absent: false.
+    #[serde(default)]
+    pub serves_peers: bool,
 }
 
 impl ClaimRequest {
@@ -225,6 +237,7 @@ impl ClaimRequest {
             profile,
             engine: self.engine.clone(),
             kinds: self.kinds.clone(),
+            serves_peers: self.serves_peers,
         })
     }
 }
@@ -395,10 +408,8 @@ async fn worker_may_announce(
     {
         return Ok(true);
     }
-    // Declared by this worker, not yet stored: it is the only holder.
-    Ok(pending::get(&mut c, hash)
-        .await?
-        .is_some_and(|p| p.worker_id == worker.0))
+    // Declared by this worker, not yet stored: it holds it (it may not be the only one).
+    Ok(pending::declared_by(&mut c, hash, worker.0).await?)
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -473,6 +484,46 @@ async fn artifact_announce(
     })
 }
 
+/// Ask the holders of an artifact this worker may read, and cannot reach, to push it to this
+/// worker's chunk server at `addr` (ADR-0041, A8).
+#[utoipa::path(post, path = "/worker/artifacts/{hash}/reverse", tag = "worker", request_body = AnnounceRequest, responses((status = 200, body = Object)))]
+async fn artifact_reverse(
+    State(state): State<AppState>,
+    w: Worker,
+    Path(hash): Path<Sha256Digest>,
+    Json(req): Json<AnnounceRequest>,
+) -> Result<Response, ApiError> {
+    if !worker_may_read(&state, w.id, &hash).await? {
+        return Err(ApiError::NotFound("artifact".into()));
+    }
+    let asked = crate::workflows::push::ask(&state, &hash, &req.addr, &req.tls_fingerprint).await?;
+    Ok(lease_covered(Json(
+        serde_json::json!({ "holders_asked": asked }),
+    )))
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct PushWait {
+    /// Wait up to this long (at most 30 s) for a request.
+    #[serde(default)]
+    pub wait_secs: u64,
+}
+
+/// Pushes this worker is asked for: outputs it holds that a reader cannot fetch from it (A8).
+#[utoipa::path(get, path = "/worker/pushes", tag = "worker", params(PushWait), responses((status = 200, body = Vec<crate::workflows::push::PushRequest>)))]
+async fn pushes(
+    State(state): State<AppState>,
+    w: Worker,
+    Query(q): Query<PushWait>,
+) -> Json<Vec<crate::workflows::push::PushRequest>> {
+    Json(
+        state
+            .push()
+            .wait(crate::workflows::push::Holder::Worker(w.id), q.wait_secs)
+            .await,
+    )
+}
+
 /// Live holders of an artifact plus a short-lived ticket for this worker.
 #[utoipa::path(get, path = "/worker/artifacts/{hash}/peers", tag = "worker", responses((status = 200, body = crate::workflows::p2p::PeersResponse)))]
 async fn artifact_peers(
@@ -501,7 +552,8 @@ async fn artifact_peers(
         .try_into()
         .map_err(|_| ApiError::Internal("stored worker key is not 32 bytes".into()))?;
     Ok(lease_covered(Json(
-        crate::workflows::p2p::peers(&state, w.id, &PublicKey(key), &hash).await?,
+        crate::workflows::p2p::peers(&state, w.id.into(), &PublicKey(key), Some(w.id), &hash)
+            .await?,
     )))
 }
 
@@ -521,6 +573,24 @@ async fn download_input(
             // producer; the server will have it soon.
             return Err(ApiError::Conflict(
                 "artifact not yet durable: fetch it from its producer or retry".into(),
+            ));
+        }
+        if artifacts::held_by_node(&mut c, &hash).await?.is_some() {
+            drop(c);
+            let range = headers
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_owned());
+            // Small enough: relayed from the node through the control plane, for a worker the
+            // node cannot be reached from (ADR-0041, A8).
+            if let Some((node, size)) = crate::workflows::relay::relayable(&state, &hash).await? {
+                return crate::workflows::relay::stream(&state, node, hash, size, range.as_deref())
+                    .await
+                    .map(lease_covered);
+            }
+            // The scientist's lab node holds it and the server keeps no copy (ADR-0041).
+            return Err(ApiError::Conflict(
+                "artifact held by a lab node: fetch it from peers".into(),
             ));
         }
     }
@@ -579,6 +649,16 @@ async fn upload_output(
     let spec = decode_spec(&t.spec_cbor)?;
     if q.size > spec.definition.resource_limits.max_output_bytes {
         return Err(ApiError::TooLarge);
+    }
+    // A job a lab node holds: the control plane relays small outputs only (ADR-0041).
+    if declared.is_none()
+        && q.size > state.config().node_relay_max_bytes
+        && jobs::output_holder(&mut c, t.job_id).await?.is_some()
+    {
+        return Err(ApiError::Unprocessable(format!(
+            "outputs above {} bytes of a job a lab node holds are declared and pulled by the node, not uploaded",
+            state.config().node_relay_max_bytes
+        )));
     }
     identities::touch_worker(&mut c, w.id).await?;
     drop(c);
@@ -648,12 +728,15 @@ async fn declare_output(
         .await?
         .ok_or_else(|| ApiError::Internal("task missing".into()))?;
     let spec = decode_spec(&t.spec_cbor)?;
+    // Two cases: the activations of a staged task (ADR-0026), and the outputs of a job a lab node
+    // holds, which the node pulls (ADR-0041).
     if !matches!(
         spec.definition.params,
         gg_protocol::messages::TaskParamsV1::GraphStage(_)
-    ) {
+    ) && jobs::output_holder(&mut c, t.job_id).await?.is_none()
+    {
         return Err(ApiError::Unprocessable(
-            "only the activations of a staged task may travel before their durable copy".into(),
+            "only the activations of a staged task, or the outputs of a job a lab node holds, may be declared".into(),
         ));
     }
     if req.size > spec.definition.resource_limits.max_output_bytes {
@@ -681,6 +764,8 @@ async fn declare_output(
         },
     )
     .await?;
+    // A lab node waiting for outputs to pull learns of it at once (ADR-0041).
+    state.signal_node();
     Ok(lease_covered(Json(
         serde_json::json!({ "chunk_size": chunk_size }),
     )))
@@ -694,6 +779,8 @@ pub fn json_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(challenge))
         .routes(routes!(session))
         .routes(routes!(me))
+        .routes(routes!(artifact_reverse))
+        .routes(routes!(pushes))
         .routes(routes!(claim))
         .routes(routes!(heartbeat_route))
         .routes(routes!(abandon_route))

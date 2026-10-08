@@ -74,6 +74,56 @@ enum Family {
         #[command(subcommand)]
         cmd: DataCmd,
     },
+    /// Lab nodes: register a laboratory's node, share it, attach it to projects (ADR-0041).
+    Node {
+        #[command(subcommand)]
+        cmd: NodeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum NodeCmd {
+    /// Register a node by its public key (printed by `gg-node init`): you become its owner.
+    Register {
+        /// Ed25519 public key (hex).
+        public_key: String,
+        /// Shown to the laboratory (a host name, for instance).
+        #[arg(long, default_value = "")]
+        name: String,
+    },
+    /// The nodes you own or may use.
+    List,
+    /// Allow another researcher to use a node you own (to attach it to their projects).
+    Grant {
+        node: uuid::Uuid,
+        researcher: uuid::Uuid,
+    },
+    /// Withdraw that permission (projects already attached stay attached).
+    Ungrant {
+        node: uuid::Uuid,
+        researcher: uuid::Uuid,
+    },
+    /// Researchers allowed to use a node you own.
+    Users { node: uuid::Uuid },
+    /// Attach a node to one of your projects: it then holds its data and steps its runs.
+    Attach {
+        node: uuid::Uuid,
+        #[arg(long)]
+        project: ProjectId,
+    },
+    /// Detach a node from a project (refused while it still works for it).
+    Detach {
+        node: uuid::Uuid,
+        #[arg(long)]
+        project: ProjectId,
+    },
+    /// Nodes attached to a project.
+    Attached {
+        #[arg(long)]
+        project: ProjectId,
+    },
+    /// Revoke a node you own: its sessions end at once.
+    Revoke { node: uuid::Uuid },
 }
 
 #[derive(Subcommand)]
@@ -262,6 +312,11 @@ enum JobCmd {
         /// Write the local reference weights (`w1.ggt`, ...) to this directory.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Read artifacts from this directory when it holds them, one file per artifact named by
+        /// its SHA-256 (a lab node's store, ADR-0041); each is checked against its hash. The rest
+        /// is downloaded.
+        #[arg(long)]
+        store: Option<PathBuf>,
     },
     /// Submit a grid of independent `mlp.train.v1` trainings as one job.
     Sweep(SweepArgs),
@@ -1029,6 +1084,7 @@ async fn graph_check(
     abs: f64,
     rel: f64,
     out: Option<&Path>,
+    store: Option<&Path>,
 ) -> anyhow::Result<()> {
     use gg_compute::grad::CoordOptim;
     use gg_compute::graph::ModelGraphV1;
@@ -1056,10 +1112,24 @@ async fn graph_check(
     // them would require memory the workers did not have (ADR-0019).
     let segments = g["segments"].as_u64().unwrap_or(1).max(1) as u32;
     let offload = g["offload_parameters"].as_bool().unwrap_or(false);
+    // Gradients travel in bf16 unless the run asked for f32 (ADR-0035): each worker's gradient is
+    // rounded before the server averages it, and the replay rounds it the same way.
+    let gradient_bf16 = g["gradient_bf16"].as_bool().unwrap_or(false);
 
     let fetch = |r: ArtifactRef, max: u64| {
         let project = project.clone();
         async move {
+            if let Some(bytes) = store
+                .map(|d| d.join(r.hash.to_hex()))
+                .and_then(|p| std::fs::read(p).ok())
+            {
+                anyhow::ensure!(
+                    bytes.len() as u64 == r.size && Sha256Digest::of_bytes(&bytes) == r.hash,
+                    "{} in the store does not match its hash",
+                    r.hash
+                );
+                return anyhow::Ok(bytes);
+            }
             let tmp = std::env::temp_dir().join(format!("gg-check-{}.bin", r.hash));
             ctx.api
                 .download(
@@ -1184,7 +1254,16 @@ async fn graph_check(
                 gg_compute::graph::task::exec_options(&p),
             )
             .map_err(|e| anyhow::anyhow!("recompute: {e}"))?;
-            parts.push((count, r.gradients));
+            let mut gradients = r.gradients;
+            if gradient_bf16 {
+                use gg_protocol::tensor_file::{bf16_bits, bf16_value};
+                for t in gradients.values_mut() {
+                    for v in &mut t.data {
+                        *v = bf16_value(bf16_bits(*v));
+                    }
+                }
+            }
+            parts.push((count, gradients));
         }
         let grad = aggregate_named(&parts)?;
         apply_step_named(optim, lr, &mut weights, &grad, &mut state_opt)?;
@@ -1270,6 +1349,7 @@ async fn collective_check(
     abs: f64,
     rel: f64,
     out: Option<&Path>,
+    store: Option<&Path>,
 ) -> anyhow::Result<()> {
     use gg_compute::grad::{CoordOptim, reference_training};
     use gg_compute::mlp::{MlpTask, Optim, initial_weights};
@@ -1283,7 +1363,7 @@ async fn collective_check(
     );
     let project = v["project_id"].as_str().unwrap_or_default().to_owned();
     if !cfg["graph"].is_null() {
-        return graph_check(ctx, run, &v, abs, rel, out).await;
+        return graph_check(ctx, run, &v, abs, rel, out, store).await;
     }
     let inputs = parse_inputs(inputs)?;
     for n in ["train_x", "train_y"] {
@@ -2325,6 +2405,60 @@ async fn real_main() -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        Family::Node { cmd } => {
+            let ctx = Ctx::new(cli.server, cli.token)?;
+            let v = match cmd {
+                NodeCmd::Register { public_key, name } => {
+                    ctx.post(
+                        "/researcher/nodes",
+                        json!({ "public_key": public_key, "name": name }),
+                    )
+                    .await?
+                }
+                NodeCmd::List => ctx.get("/researcher/nodes").await?,
+                NodeCmd::Grant { node, researcher } => {
+                    ctx.post(
+                        &format!("/researcher/nodes/{node}/users"),
+                        json!({ "researcher_id": researcher }),
+                    )
+                    .await?
+                }
+                NodeCmd::Ungrant { node, researcher } => {
+                    ctx.post(
+                        &format!("/researcher/nodes/{node}/users/{researcher}/remove"),
+                        json!({}),
+                    )
+                    .await?
+                }
+                NodeCmd::Users { node } => {
+                    ctx.get(&format!("/researcher/nodes/{node}/users")).await?
+                }
+                NodeCmd::Attach { node, project } => {
+                    ctx.post(
+                        &format!("/researcher/projects/{project}/nodes"),
+                        json!({ "node_id": node }),
+                    )
+                    .await?
+                }
+                NodeCmd::Detach { node, project } => {
+                    ctx.post(
+                        &format!("/researcher/projects/{project}/nodes/{node}/detach"),
+                        json!({}),
+                    )
+                    .await?
+                }
+                NodeCmd::Attached { project } => {
+                    ctx.get(&format!("/researcher/projects/{project}/nodes"))
+                        .await?
+                }
+                NodeCmd::Revoke { node } => {
+                    ctx.post(&format!("/researcher/nodes/{node}/revoke"), json!({}))
+                        .await?
+                }
+            };
+            print(&v);
+            Ok(())
+        }
         Family::Project { cmd } => {
             let ctx = Ctx::new(cli.server, cli.token)?;
             match cmd {
@@ -2464,7 +2598,19 @@ async fn real_main() -> anyhow::Result<()> {
                     abs,
                     rel,
                     out,
-                } => collective_check(&ctx, run, &inputs, abs, rel, out.as_deref()).await?,
+                    store,
+                } => {
+                    collective_check(
+                        &ctx,
+                        run,
+                        &inputs,
+                        abs,
+                        rel,
+                        out.as_deref(),
+                        store.as_deref(),
+                    )
+                    .await?
+                }
                 JobCmd::Sweep(a) => sweep(&ctx, a).await?,
                 JobCmd::Compare { job, out } => compare(&ctx, job, out.as_deref()).await?,
                 JobCmd::Status { job } => {

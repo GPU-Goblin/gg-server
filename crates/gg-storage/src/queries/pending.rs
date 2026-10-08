@@ -105,6 +105,22 @@ pub async fn get(
     r.map(to_row).transpose()
 }
 
+/// Whether `worker` declared `hash` (several attempts may produce the same bytes, such as a
+/// constant activation of every micro-batch).
+pub async fn declared_by(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+    worker: Uuid,
+) -> Result<bool, StorageError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pending_outputs WHERE hash = $1 AND worker_id = $2)",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .bind(worker)
+    .fetch_one(c)
+    .await?)
+}
+
 /// The declaration of a hash by a given attempt.
 pub async fn get_for_attempt(
     c: &mut PgConnection,
@@ -165,4 +181,137 @@ pub async fn overdue(c: &mut PgConnection, attempts: &[Uuid]) -> Result<Vec<Uuid
     .bind(attempts)
     .fetch_all(c)
     .await?)
+}
+
+/// An output a lab node is to pull.
+#[derive(Clone, Debug)]
+pub struct ToPull {
+    /// Hash.
+    pub hash: Sha256Digest,
+    /// Declared size.
+    pub size: u64,
+    /// Project.
+    pub project_id: Uuid,
+    /// Producing attempt.
+    pub attempt_id: Uuid,
+}
+
+/// Outputs declared for the jobs `node` holds, not pulled yet, oldest first.
+pub async fn to_pull(
+    c: &mut PgConnection,
+    node: Uuid,
+    limit: i64,
+) -> Result<Vec<ToPull>, StorageError> {
+    let rows: Vec<(Vec<u8>, i64, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT p.hash, p.size, p.project_id, p.attempt_id FROM pending_outputs p
+           JOIN attempts a ON a.id = p.attempt_id
+           JOIN tasks t ON t.id = a.task_id
+           JOIN jobs j ON j.id = t.job_id
+          WHERE j.output_holder = $1 AND p.deadline > now() AND a.state IN ('active', 'submitted')
+          ORDER BY p.created_at LIMIT $2",
+    )
+    .bind(node)
+    .bind(limit)
+    .fetch_all(c)
+    .await?;
+    rows.into_iter()
+        .map(|(h, size, project_id, attempt_id)| {
+            Ok(ToPull {
+                hash: <[u8; 32]>::try_from(h.as_slice())
+                    .map(Sha256Digest)
+                    .map_err(|_| StorageError::Corrupt("pending hash".into()))?,
+                size: size as u64,
+                project_id,
+                attempt_id,
+            })
+        })
+        .collect()
+}
+
+/// Whether `hash` is an output declared for a job `node` holds, not pulled yet.
+pub async fn is_for_node(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+    node: Uuid,
+) -> Result<bool, StorageError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pending_outputs p
+           JOIN attempts a ON a.id = p.attempt_id
+           JOIN tasks t ON t.id = a.task_id
+           JOIN jobs j ON j.id = t.job_id
+          WHERE p.hash = $1 AND j.output_holder = $2)",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .bind(node)
+    .fetch_one(c)
+    .await?)
+}
+
+/// Submitted attempts of jobs held by a lab node with an output the node did not pull before its
+/// deadline: their tasks are sent again.
+pub async fn unpulled_overdue(c: &mut PgConnection, limit: i64) -> Result<Vec<Uuid>, StorageError> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT p.attempt_id FROM pending_outputs p
+           JOIN attempts a ON a.id = p.attempt_id
+           JOIN tasks t ON t.id = a.task_id
+           JOIN jobs j ON j.id = t.job_id
+          WHERE j.output_holder IS NOT NULL AND p.deadline < now() AND a.state = 'submitted'
+          LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(c)
+    .await?)
+}
+
+/// Whether `hash` is a declared output of a job a lab node holds: the node, not the server, will
+/// hold it.
+pub async fn bound_for_a_node(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+) -> Result<bool, StorageError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pending_outputs p
+           JOIN attempts a ON a.id = p.attempt_id
+           JOIN tasks t ON t.id = a.task_id
+           JOIN jobs j ON j.id = t.job_id
+          WHERE p.hash = $1 AND j.output_holder IS NOT NULL)",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .fetch_one(c)
+    .await?)
+}
+
+/// Submitted attempts that declared `hash` for a job `node` holds.
+pub async fn submitted_attempts_for_node(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+    node: Uuid,
+) -> Result<Vec<Uuid>, StorageError> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT p.attempt_id FROM pending_outputs p
+           JOIN attempts a ON a.id = p.attempt_id
+           JOIN tasks t ON t.id = a.task_id
+           JOIN jobs j ON j.id = t.job_id
+          WHERE p.hash = $1 AND j.output_holder = $2 AND a.state = 'submitted'",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .bind(node)
+    .fetch_all(c)
+    .await?)
+}
+
+/// Forget the declarations of an attempt whose outputs its lab node never got, and mark it so that
+/// its worker is not given the same task again.
+pub async fn drop_attempt(c: &mut PgConnection, attempt: Uuid) -> Result<u64, StorageError> {
+    sqlx::query("UPDATE attempts SET outputs_not_pulled = true WHERE id = $1")
+        .bind(attempt)
+        .execute(&mut *c)
+        .await?;
+    Ok(
+        sqlx::query("DELETE FROM pending_outputs WHERE attempt_id = $1")
+            .bind(attempt)
+            .execute(c)
+            .await?
+            .rows_affected(),
+    )
 }

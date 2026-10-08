@@ -379,7 +379,7 @@ async fn tracker_serves_only_workers_entitled_to_the_artifact() {
     let ticket: Signed<PeerTicketV1> = serde_json::from_value(own["ticket"].clone()).unwrap();
     ticket.verify(&env.network, Domain::PeerTicket).unwrap();
     assert_eq!(ticket.signer, env.server_key);
-    assert_eq!(ticket.body.reader_id, holder.id);
+    assert_eq!(ticket.body.reader_id, holder.id.into());
     assert_eq!(ticket.body.reader_key, holder.key.public_key());
     assert_eq!(ticket.body.artifact_hash, hash);
     assert_eq!(ticket.body.chunk_size, manifest.body.chunk_size);

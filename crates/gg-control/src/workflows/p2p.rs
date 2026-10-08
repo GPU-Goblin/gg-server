@@ -2,7 +2,8 @@
 //!
 //! The control plane keeps the durable copy and remains the only authority: it computes the chunk
 //! digests over its own bytes and signs them (except for an activation still travelling before its
-//! durable copy, whose digests its producer declared, ADR-0026), it decides who may read an artifact (short-lived
+//! durable copy, whose digests its producer declared, ADR-0026, and an artifact a lab node holds,
+//! whose digests the node declared, ADR-0041), it decides who may read an artifact (short-lived
 //! signed tickets), and it keeps a bounded, expiring registry of who announced holding what. Peers
 //! move bytes; they never grant access, never extend a lease and never validate a result.
 
@@ -22,8 +23,10 @@ use crate::state::AppState;
 /// A peer as advertised to an authorized reader.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PeerEntry {
-    /// Worker record of the holder.
-    pub worker_id: WorkerId,
+    /// Worker record of the holder, when a worker holds it.
+    pub worker_id: Option<WorkerId>,
+    /// Lab node holding it, when the scientist's node does (ADR-0041).
+    pub node_id: Option<NodeId>,
     /// `host:port` the holder announced.
     pub addr: String,
     /// SHA-256 of the holder's TLS transport key (RFC 7250 raw public key). A reader pins it: the
@@ -39,6 +42,9 @@ pub struct PeersResponse {
     /// Ticket signed by the server, valid for this artifact and this reader only.
     #[schema(value_type = Object)]
     pub ticket: Signed<PeerTicketV1>,
+    /// Whether the control plane serves the artifact itself. When it does not (an artifact held by
+    /// a lab node, ADR-0041), a reader keeps asking peers instead of falling back to it.
+    pub server_holds: bool,
 }
 
 /// Whether an announced address may be handed to other workers. Unspecified, multicast,
@@ -212,6 +218,34 @@ pub async fn announce(
     Ok(())
 }
 
+/// Record that the lab node `node` holds `hash` at `addr` (the caller has checked it does).
+pub async fn announce_node(
+    state: &AppState,
+    node: NodeId,
+    hash: &Sha256Digest,
+    addr: &str,
+    tls_fingerprint: &Sha256Digest,
+) -> Result<(), ApiError> {
+    let addr = parse_addr(state, addr)?;
+    dial_back(state, &addr).await?;
+    let mut c = state
+        .db()
+        .pool()
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    p2p::announce_node(
+        &mut c,
+        hash,
+        node,
+        &addr.to_string(),
+        tls_fingerprint,
+        state.config().p2p_peer_ttl_secs,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Check that the announced address actually accepts a connection before other workers are sent
 /// there. Nothing is written to the socket and nothing is read: a worker behind a NAT without a
 /// mapping is simply not advertised, and the registry keeps no unreachable entries (ADR-0013).
@@ -235,11 +269,13 @@ pub async fn dial_back(state: &AppState, addr: &SocketAddr) -> Result<(), ApiErr
     }
 }
 
-/// Live holders of `hash` plus a ticket for `worker` (the caller has checked authorization).
+/// Live holders of `hash` plus a ticket for `reader`, a worker or a lab node (the caller has
+/// checked authorization). A worker is not sent to itself.
 pub async fn peers(
     state: &AppState,
-    worker: WorkerId,
-    worker_key: &gg_protocol::keys::PublicKey,
+    reader: ReaderId,
+    reader_key: &gg_protocol::keys::PublicKey,
+    exclude: Option<WorkerId>,
     hash: &Sha256Digest,
 ) -> Result<PeersResponse, ApiError> {
     let row = chunk_digests(state, hash).await?;
@@ -249,7 +285,21 @@ pub async fn peers(
         .acquire()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let rows = p2p::list_peers(&mut c, hash, worker, state.config().p2p_max_peers).await?;
+    let rows = p2p::list_peers(&mut c, hash, exclude, state.config().p2p_max_peers).await?;
+    // The server holds it, or will: not when a lab node holds it, or will once it has pulled it;
+    // but it relays a small artifact the node holds (A8).
+    let held_or_bound = gg_storage::queries::artifacts::held_by_node(&mut c, hash)
+        .await?
+        .is_some()
+        || gg_storage::queries::pending::bound_for_a_node(&mut c, hash).await?;
+    // Given back before `relayable` takes one: holding a connection while waiting for another
+    // deadlocks the pool once as many readers ask at once as it has connections.
+    drop(c);
+    let server_holds = state.objects().exists(hash)
+        || !held_or_bound
+        || crate::workflows::relay::relayable(state, hash)
+            .await?
+            .is_some();
     let now = UnixMillis::now();
     let ticket = PeerTicketV1 {
         protocol_version: gg_protocol::PROTOCOL_VERSION,
@@ -257,18 +307,19 @@ pub async fn peers(
         artifact_hash: *hash,
         size: row.size,
         chunk_size: row.chunk_size,
-        reader_id: worker,
-        reader_key: *worker_key,
+        reader_id: reader,
+        reader_key: *reader_key,
         issued_at: now,
         expires_at: UnixMillis(now.0 + state.config().p2p_ticket_ttl_secs * 1000),
     };
     Ok(PeersResponse {
         peers: rows
             .into_iter()
-            .map(|(worker_id, addr, tls_fingerprint)| PeerEntry {
-                worker_id,
-                addr,
-                tls_fingerprint,
+            .map(|p| PeerEntry {
+                worker_id: p.worker_id,
+                node_id: p.node_id,
+                addr: p.addr,
+                tls_fingerprint: p.tls_fingerprint,
             })
             .collect(),
         ticket: Signed::sign(
@@ -278,6 +329,7 @@ pub async fn peers(
             ticket,
         )
         .map_err(|e| ApiError::Internal(e.to_string()))?,
+        server_holds,
     })
 }
 

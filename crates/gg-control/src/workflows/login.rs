@@ -84,6 +84,9 @@ pub async fn issue_challenge(
         "validator-login" => identities::get_validator_by_key(&mut c, &key.0)
             .await?
             .is_some(),
+        "node-login" => gg_storage::queries::nodes::get_by_key(&mut c, &key.0)
+            .await?
+            .is_some_and(|n| n.revoked_at.is_none()),
         _ => return Err(ApiError::Unprocessable("unknown action".into())),
     };
     if !known {
@@ -149,6 +152,14 @@ pub async fn create_session(
                 .await?
                 .ok_or(ApiError::Unauthorized)?;
             ("validator", v.id)
+        }
+        "node-login" => {
+            let n = gg_storage::queries::nodes::get_by_key(&mut tx, &body.public_key.0)
+                .await?
+                .filter(|n| n.revoked_at.is_none())
+                .ok_or(ApiError::Unauthorized)?;
+            gg_storage::queries::nodes::touch(&mut tx, NodeId(n.id)).await?;
+            ("node", n.id)
         }
         _ => return Err(ApiError::Unprocessable("unknown action".into())),
     };

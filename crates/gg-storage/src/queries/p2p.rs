@@ -1,6 +1,5 @@
 //! Chunk digests and peer announcements for peer-assisted distribution (ADR-0012).
 
-use ::time::OffsetDateTime;
 use gg_core::*;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -101,40 +100,96 @@ pub async fn announce_peer(
     Ok(())
 }
 
-/// Live peers holding `hash`, excluding `exclude`, most recent first.
+/// A live holder of an artifact: a worker, or a lab node (ADR-0041).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerRow {
+    /// Worker holding it, when a worker does.
+    pub worker_id: Option<WorkerId>,
+    /// Lab node holding it, when a node does.
+    pub node_id: Option<NodeId>,
+    /// `ip:port`.
+    pub addr: String,
+    /// SHA-256 of the holder's TLS transport key.
+    pub tls_fingerprint: Sha256Digest,
+}
+
+/// Live holders of `hash`, excluding the worker `exclude` (the reader itself): the lab node first when one holds it
+/// (the source nobody else may have yet), then workers, most recent first.
 pub async fn list_peers(
     c: &mut PgConnection,
     hash: &Sha256Digest,
-    exclude: WorkerId,
+    exclude: Option<WorkerId>,
     limit: i64,
-) -> Result<Vec<(WorkerId, String, Sha256Digest)>, StorageError> {
-    let rows: Vec<(Uuid, String, Vec<u8>, OffsetDateTime)> = sqlx::query_as(
-        "SELECT worker_id, addr, tls_fingerprint, announced_at FROM artifact_peers
-         WHERE hash = $1 AND worker_id <> $2 AND expires_at > now()
-         ORDER BY announced_at DESC LIMIT $3",
+) -> Result<Vec<PeerRow>, StorageError> {
+    type Row = (Option<Uuid>, Option<Uuid>, String, Vec<u8>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT worker_id, node_id, addr, tls_fingerprint FROM (
+             SELECT NULL::uuid AS worker_id, node_id, addr, tls_fingerprint, announced_at, 0 AS rank
+             FROM node_peers WHERE hash = $1 AND expires_at > now()
+             UNION ALL
+             SELECT worker_id, NULL::uuid, addr, tls_fingerprint, announced_at, 1
+             FROM artifact_peers WHERE hash = $1 AND ($2::uuid IS NULL OR worker_id <> $2)
+               AND expires_at > now()
+         ) h ORDER BY rank, announced_at DESC LIMIT $3",
     )
     .bind(hash.as_bytes().as_slice())
-    .bind(exclude.0)
+    .bind(exclude.map(|w| w.0))
     .bind(limit)
     .fetch_all(c)
     .await?;
     rows.into_iter()
-        .map(|(w, a, f, _)| {
+        .map(|(w, n, addr, f)| {
             let bytes: [u8; 32] = f
                 .try_into()
                 .map_err(|_| StorageError::Corrupt("tls fingerprint is not 32 bytes".into()))?;
-            Ok((WorkerId(w), a, Sha256Digest(bytes)))
+            Ok(PeerRow {
+                worker_id: w.map(WorkerId),
+                node_id: n.map(NodeId),
+                addr,
+                tls_fingerprint: Sha256Digest(bytes),
+            })
         })
         .collect()
 }
 
+/// Record (or refresh) that the lab node `node` holds `hash` at `addr` until `ttl_secs` from now.
+pub async fn announce_node(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+    node: NodeId,
+    addr: &str,
+    tls_fingerprint: &Sha256Digest,
+    ttl_secs: i64,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO node_peers (hash, node_id, addr, tls_fingerprint, expires_at)
+         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))
+         ON CONFLICT (hash, node_id)
+         DO UPDATE SET addr = EXCLUDED.addr, tls_fingerprint = EXCLUDED.tls_fingerprint,
+                       announced_at = now(), expires_at = EXCLUDED.expires_at",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .bind(node.0)
+    .bind(addr)
+    .bind(tls_fingerprint.as_bytes().as_slice())
+    .bind(ttl_secs as f64)
+    .execute(c)
+    .await?;
+    Ok(())
+}
+
 /// Drop expired announcements (called by the reaper). Returns how many were removed.
 pub async fn delete_expired_peers(c: &mut PgConnection) -> Result<u64, StorageError> {
+    let nodes = sqlx::query("DELETE FROM node_peers WHERE expires_at <= now()")
+        .execute(&mut *c)
+        .await?
+        .rows_affected();
     Ok(
         sqlx::query("DELETE FROM artifact_peers WHERE expires_at <= now()")
             .execute(c)
             .await?
-            .rows_affected(),
+            .rows_affected()
+            + nodes,
     )
 }
 
@@ -150,4 +205,19 @@ pub async fn delete_peers_of_worker(
             .await?
             .rows_affected(),
     )
+}
+
+/// Whether `node` has a live announcement for `hash`: readers can reach it directly.
+pub async fn node_announced(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+    node: NodeId,
+) -> Result<bool, StorageError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM node_peers WHERE hash = $1 AND node_id = $2 AND expires_at > now())",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .bind(node.0)
+    .fetch_one(c)
+    .await?)
 }

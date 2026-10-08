@@ -196,9 +196,16 @@ pub async fn resolve(
         return Err(ApiError::Conflict("dispute is already resolved".into()));
     }
     let opinions = opinions(&mut tx, SubmissionId(d.submission_id)).await?;
-    if !opinions
-        .iter()
-        .any(|o| o.outcome.as_deref() == Some(outcome.as_str()))
+    // A dispute between computations that no two agree on (ADR-0042): any computation may be the
+    // right one, and the receipt references the comparisons.
+    let compared: Option<Vec<Sha256Digest>> = d
+        .outcomes
+        .get("comparisons")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if compared.is_none()
+        && !opinions
+            .iter()
+            .any(|o| o.outcome.as_deref() == Some(outcome.as_str()))
     {
         return Err(ApiError::Unprocessable(format!(
             "no validator signed a '{outcome}' decision on this submission: an operator settles between recorded opinions"
@@ -222,10 +229,20 @@ pub async fn resolve(
         )));
     }
     // The receipt references the signed decision that supports the settled outcome.
-    let supporting = crate::workflows::decide::decision_hash_for(&mut tx, &opinions, outcome)
-        .await?
-        .ok_or_else(|| ApiError::Internal("no decision to reference".into()))?;
-    let all = crate::workflows::decide::all_decision_hashes(&mut tx, &opinions).await?;
+    let (supporting, all) = match compared {
+        Some(hashes) => (
+            *hashes
+                .first()
+                .ok_or_else(|| ApiError::Internal("no comparison to reference".into()))?,
+            hashes,
+        ),
+        None => (
+            crate::workflows::decide::decision_hash_for(&mut tx, &opinions, outcome)
+                .await?
+                .ok_or_else(|| ApiError::Internal("no decision to reference".into()))?,
+            crate::workflows::decide::all_decision_hashes(&mut tx, &opinions).await?,
+        ),
+    };
     let (task_state, receipt_id) = crate::workflows::decide::finalize(
         state,
         &mut tx,

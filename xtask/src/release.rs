@@ -15,9 +15,17 @@ use gg_protocol::release::{ReleaseArtifactV1, ReleaseManifestV1, hash_file};
 use gg_protocol::signed::Signed;
 
 /// Executables a contributor or an operator actually runs.
-const BINARIES: [&str; 5] = ["gg", "gg-server", "gg-worker", "gg-executor", "gg-verifier"];
+const BINARIES: [&str; 7] = [
+    "gg",
+    "gg-server",
+    "gg-worker",
+    "gg-executor",
+    "gg-verifier",
+    "gg-node",
+    "gg-desk",
+];
 /// Those built from the gg-worker repository.
-const WORKER_BINARIES: [&str; 2] = ["gg-worker", "gg-executor"];
+const WORKER_BINARIES: [&str; 3] = ["gg-worker", "gg-executor", "gg-desk"];
 
 #[derive(Args)]
 pub struct ReleaseArgs {

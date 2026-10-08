@@ -513,11 +513,21 @@ pub(crate) async fn finalize(
     match outcome {
         VerificationOutcome::Accepted => {
             let spec = decode_spec(&task.spec_cbor)?;
-            let role = a
-                .attempt_role()
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            // A replica's assignment says nothing of its role (ADR-0042): it is its task's.
+            let role = if task.replica_of.is_some() {
+                AttemptRole::Replica
+            } else {
+                a.attempt_role()
+                    .map_err(|e| ApiError::Internal(e.to_string()))?
+            };
             let reward = spec.definition.reward_schedule.for_role(role);
-            let vcost = spec.definition.reward_schedule.verification_cost;
+            // A replicated computation (ADR-0042) is verified by the other computations, which are
+            // paid their own reward: no validator's recomputation to charge.
+            let vcost = if super::replicas::replicated(tx, task).await? {
+                Credits::ZERO
+            } else {
+                spec.definition.reward_schedule.verification_cost
+            };
             let key = gg_ledger::reward_key(AttemptId(a.id), role);
             let posting = gg_ledger::commit_and_reward(
                 tx,

@@ -136,7 +136,7 @@ pub async fn expire(c: &mut PgConnection, hash: &Sha256Digest) -> Result<bool, S
     .bind(hash.as_bytes().as_slice())
     .execute(&mut *c)
     .await?;
-    for table in ["artifact_peers", "artifact_chunks"] {
+    for table in ["artifact_peers", "node_peers", "artifact_chunks"] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {table} WHERE hash = $1"
         )))
@@ -226,4 +226,76 @@ pub async fn delete_peers_of(
         .execute(c)
         .await?;
     Ok(r.rows_affected())
+}
+
+/// Record an artifact a lab node holds (ADR-0041): its hash, size and owner project, and the chunk
+/// digests the node declared. The server keeps no copy. Returns false when the hash is already
+/// known (the caller decides whether that is the same declaration).
+pub async fn insert_node_artifact(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+    size: u64,
+    schema: &str,
+    project_id: ProjectId,
+    node: NodeId,
+) -> Result<bool, StorageError> {
+    let r = sqlx::query(
+        "INSERT INTO artifacts (hash, size, media_type, schema, visibility, license, project_id, uploaded_by, held_by_node)
+         VALUES ($1, $2, 'application/octet-stream', $3, 'project', '', $4, $5, $6)
+         ON CONFLICT (hash) DO NOTHING",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .bind(size as i64)
+    .bind(schema)
+    .bind(project_id.0)
+    .bind(format!("node:{node}"))
+    .bind(node.0)
+    .execute(c)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
+/// Record the first bytes of an artifact as its holding node declared them (at most 64).
+pub async fn set_node_header(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+    header: &[u8],
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE artifacts SET node_header = $2 WHERE hash = $1 AND held_by_node IS NOT NULL",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .bind(header)
+    .execute(c)
+    .await?;
+    Ok(())
+}
+
+/// The first bytes of an artifact a lab node holds, as it declared them.
+pub async fn node_header(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+) -> Result<Option<Vec<u8>>, StorageError> {
+    Ok(sqlx::query_scalar::<_, Option<Vec<u8>>>(
+        "SELECT node_header FROM artifacts WHERE hash = $1",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .fetch_optional(c)
+    .await?
+    .flatten())
+}
+
+/// The lab node holding an artifact, when a node declared it (ADR-0041).
+pub async fn held_by_node(
+    c: &mut PgConnection,
+    hash: &Sha256Digest,
+) -> Result<Option<NodeId>, StorageError> {
+    Ok(sqlx::query_scalar::<_, Option<uuid::Uuid>>(
+        "SELECT held_by_node FROM artifacts WHERE hash = $1",
+    )
+    .bind(hash.as_bytes().as_slice())
+    .fetch_optional(c)
+    .await?
+    .flatten()
+    .map(NodeId))
 }

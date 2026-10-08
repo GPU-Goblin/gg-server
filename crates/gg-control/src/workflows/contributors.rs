@@ -159,31 +159,43 @@ pub async fn set_suspended(
     reason: &str,
 ) -> Result<usize, ApiError> {
     let mut tx = state.db().begin().await?;
-    if !contributors::set_suspended(&mut tx, contributor, suspended, reason).await? {
+    let machines = set_suspended_in(&mut tx, actor, contributor, suspended, reason).await?;
+    tx.commit().await?;
+    Ok(machines)
+}
+
+/// [`set_suspended`] within a transaction.
+pub(crate) async fn set_suspended_in(
+    tx: &mut gg_storage::PgConnection,
+    actor: &str,
+    contributor: uuid::Uuid,
+    suspended: bool,
+    reason: &str,
+) -> Result<usize, ApiError> {
+    if !contributors::set_suspended(tx, contributor, suspended, reason).await? {
         return Err(ApiError::NotFound("contributor".into()));
     }
     let mut machines = 0;
     if suspended {
-        contributors::revoke_all(&mut tx, contributor).await?;
-        for w in contributors::deauthorize_machines(&mut tx, contributor).await? {
-            identities::revoke_sessions(&mut tx, "worker", w).await?;
-            gg_storage::queries::p2p::delete_peers_of_worker(&mut tx, WorkerId(w)).await?;
+        contributors::revoke_all(tx, contributor).await?;
+        for w in contributors::deauthorize_machines(tx, contributor).await? {
+            identities::revoke_sessions(tx, "worker", w).await?;
+            gg_storage::queries::p2p::delete_peers_of_worker(tx, WorkerId(w)).await?;
             machines += 1;
         }
     } else {
-        for m in contributors::machines(&mut tx, contributor).await? {
-            identities::set_worker_authorized(&mut tx, WorkerId(m.id), true).await?;
+        for m in contributors::machines(tx, contributor).await? {
+            identities::set_worker_authorized(tx, WorkerId(m.id), true).await?;
             machines += 1;
         }
     }
     misc::audit(
-        &mut tx,
+        tx,
         actor,
         "contributor.suspend",
         &contributor.to_string(),
         serde_json::json!({ "suspended": suspended, "reason": reason, "machines": machines }),
     )
     .await?;
-    tx.commit().await?;
     Ok(machines)
 }

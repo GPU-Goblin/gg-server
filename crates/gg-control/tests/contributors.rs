@@ -404,3 +404,318 @@ async fn sign_up_is_closed_unless_the_operator_opens_it() {
     assert!(cfg.validate().is_ok());
     env.stop().await;
 }
+
+impl Env {
+    async fn json(
+        &self,
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: Value,
+    ) -> (u16, Value) {
+        let url = format!("{}{path}", self.base);
+        let mut req = if method == "GET" {
+            self.http.get(url)
+        } else {
+            self.http.post(url).json(&body)
+        };
+        if let Some(b) = bearer {
+            req = req.bearer_auth(b);
+        }
+        let r = req.send().await.unwrap();
+        let s = r.status().as_u16();
+        (s, r.json().await.unwrap_or(Value::Null))
+    }
+}
+
+/// The contributor's application signs up, gets an enrollment code and attaches a machine without a
+/// page or a cookie: the same account, the same rules as the forms.
+#[tokio::test]
+async fn the_application_signs_up_and_attaches_a_machine_with_json_alone() {
+    let env = start(true).await;
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/code",
+            None,
+            json!({ "email": "not an address" }),
+        )
+        .await;
+    assert_eq!(s, 422);
+    let (s, sent) = env
+        .json(
+            "POST",
+            "/contributor/v1/code",
+            None,
+            json!({ "email": "Ada@Example.org" }),
+        )
+        .await;
+    assert_eq!(s, 200, "{sent}");
+    assert_eq!(sent["email"], "ada@example.org");
+    let code = env.newest_code().await;
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/session",
+            None,
+            json!({ "email": "ada@example.org", "code": "12345678" }),
+        )
+        .await;
+    assert_eq!(s, 403, "a wrong code");
+    let (s, session) = env
+        .json(
+            "POST",
+            "/contributor/v1/session",
+            None,
+            json!({ "email": "ada@example.org", "code": code }),
+        )
+        .await;
+    assert_eq!(s, 200, "{session}");
+    let token = session["session"].as_str().unwrap().to_owned();
+    assert!(token.starts_with("ggp_"));
+    // The code is used: it does not open a second session.
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/session",
+            None,
+            json!({ "email": "ada@example.org", "code": code }),
+        )
+        .await;
+    assert_eq!(s, 403);
+
+    let (s, _) = env
+        .json("GET", "/contributor/v1/me", None, Value::Null)
+        .await;
+    assert_eq!(s, 401, "no session");
+    let (s, _) = env
+        .json("GET", "/contributor/v1/me", Some("ggp_wrong"), Value::Null)
+        .await;
+    assert_eq!(s, 401);
+    let (s, me) = env
+        .json("GET", "/contributor/v1/me", Some(&token), Value::Null)
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["email"], "ada@example.org");
+    assert_eq!(me["machines"].as_array().unwrap().len(), 0);
+
+    let (s, e) = env
+        .json(
+            "POST",
+            "/contributor/v1/enrollment",
+            Some(&token),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(s, 200, "{e}");
+    let enroll = e["enrollment_token"].as_str().unwrap().to_owned();
+    assert!(enroll.starts_with("gge_"));
+    assert!(e["install_command"].as_str().unwrap().contains(&enroll));
+
+    // A machine attaches itself with it and appears on the account.
+    let (_key, id, machine) = env.machine().await;
+    let (s, r) = env
+        .api(
+            &machine,
+            "/worker/enroll",
+            json!({ "enrollment_token": enroll }),
+        )
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let (_, me) = env
+        .json("GET", "/contributor/v1/me", Some(&token), Value::Null)
+        .await;
+    assert_eq!(me["machines"][0]["worker_id"], id.to_string());
+    assert_eq!(me["machines"][0]["working"], true);
+
+    // The page's cookie and the application's session are the same account.
+    let cookie = env.sign_up("ada@example.org").await;
+    let (_, page) = env.page("/portal/contribute", Some(&cookie)).await;
+    assert!(page.contains(&id.to_string()), "{page}");
+
+    let (s, _) = env
+        .json("POST", "/contributor/v1/logout", Some(&token), Value::Null)
+        .await;
+    assert_eq!(s, 204);
+    let (s, _) = env
+        .json("GET", "/contributor/v1/me", Some(&token), Value::Null)
+        .await;
+    assert_eq!(s, 401, "signed out");
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn the_application_finds_sign_up_closed_when_the_operator_did_not_open_it() {
+    let env = start(false).await;
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/code",
+            None,
+            json!({ "email": "ada@example.org" }),
+        )
+        .await;
+    assert_eq!(s, 404);
+    env.stop().await;
+}
+
+/// One account per person: a contributor signed in on the site asks for researcher access, an
+/// operator reviews it (laboratory and purpose in the list), and only then can the account create
+/// an API token, which works on the researcher API.
+#[tokio::test]
+async fn the_account_asks_for_researcher_access_and_gets_a_token_once_admitted() {
+    let env = start(true).await;
+    env.json(
+        "POST",
+        "/contributor/v1/code",
+        None,
+        json!({ "email": "marie@lab.example" }),
+    )
+    .await;
+    let code = env.newest_code().await;
+    let (_, s) = env
+        .json(
+            "POST",
+            "/contributor/v1/session",
+            None,
+            json!({ "email": "marie@lab.example", "code": code }),
+        )
+        .await;
+    let session = s["session"].as_str().unwrap().to_owned();
+    let (s, r) = env
+        .json(
+            "GET",
+            "/contributor/v1/research",
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+    assert_eq!((s, r["status"].as_str()), (200, Some("none")), "{r}");
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/research/token",
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(s, 403, "no token without researcher access");
+
+    // Incomplete request: refused, nothing created.
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/research/request",
+            Some(&session),
+            json!({ "name": "Marie", "lab": "LAAS", "purpose": "too short" }),
+        )
+        .await;
+    assert_eq!(s, 422);
+    let request = json!({
+        "name": "Marie Curie",
+        "lab": "LAAS-CNRS",
+        "purpose": "Train a small transformer on public protein sequences.",
+    });
+    let (s, r) = env
+        .json(
+            "POST",
+            "/contributor/v1/research/request",
+            Some(&session),
+            request.clone(),
+        )
+        .await;
+    assert_eq!((s, r["status"].as_str()), (200, Some("pending")), "{r}");
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/research/request",
+            Some(&session),
+            request,
+        )
+        .await;
+    assert_eq!(s, 409, "a second request is refused");
+    let (_, r) = env
+        .json(
+            "GET",
+            "/contributor/v1/research",
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r["status"], "pending");
+    let (s, _) = env
+        .json(
+            "POST",
+            "/contributor/v1/research/token",
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(s, 403, "no token while pending");
+
+    // The operator sees the request and admits the researcher.
+    let list = env
+        .http
+        .get(format!("{}/v1/admin/researchers", env.base))
+        .bearer_auth(&env.admin)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let me = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["email"] == "marie@lab.example")
+        .expect("the request in the admin list")
+        .clone();
+    assert_eq!(me["lab"], "LAAS-CNRS");
+    assert_eq!(me["display_name"], "Marie Curie");
+    assert!(me["purpose"].as_str().unwrap().contains("protein"));
+    let id = me["researcher_id"].as_str().unwrap();
+    let (s, _) = env
+        .api(
+            &env.admin,
+            &format!("/admin/researchers/{id}/admission"),
+            json!({ "state": "approved", "note": "pilot" }),
+        )
+        .await;
+    assert!(s == 200 || s == 204, "{s}");
+
+    let (s, t) = env
+        .json(
+            "POST",
+            "/contributor/v1/research/token",
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(s, 200, "{t}");
+    let token = t["token"].as_str().unwrap();
+    assert!(token.starts_with("ggt_"));
+    let me = env
+        .http
+        .get(format!("{}/v1/researcher/me", env.base))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        me.status().as_u16(),
+        200,
+        "the token works on the researcher API"
+    );
+    let (_, r) = env
+        .json(
+            "GET",
+            "/contributor/v1/research",
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r["status"], "approved");
+    assert_eq!(r["projects"].as_array().unwrap().len(), 0);
+    env.stop().await;
+}

@@ -110,6 +110,25 @@ pub struct WorkerRow {
     pub created_at: OffsetDateTime,
 }
 
+/// Lab node (ADR-0041).
+#[derive(Clone, Debug, FromRow)]
+pub struct LabNodeRow {
+    /// Id.
+    pub id: Uuid,
+    /// Owner.
+    pub researcher_id: Uuid,
+    /// Public key bytes.
+    pub public_key: Vec<u8>,
+    /// Name.
+    pub display_name: String,
+    /// Created.
+    pub created_at: OffsetDateTime,
+    /// Revoked by its researcher.
+    pub revoked_at: Option<OffsetDateTime>,
+    /// Last session.
+    pub last_seen_at: Option<OffsetDateTime>,
+}
+
 /// Validator.
 #[derive(Clone, Debug, FromRow)]
 pub struct ValidatorRow {
@@ -239,6 +258,12 @@ pub struct TaskRow {
     pub created_at: OffsetDateTime,
     /// Updated.
     pub updated_at: OffsetDateTime,
+    /// The first computation's task, when this one is a replica of it (ADR-0042).
+    pub replica_of: Option<Uuid>,
+    /// 0: a first computation; 1: its replica; 2: the third computation after a disagreement.
+    pub replica_seq: i16,
+    /// For a comparer's task (`replica.compare.v1`): the family whose computations it compares.
+    pub compare_family: Option<Uuid>,
 }
 
 impl TaskRow {

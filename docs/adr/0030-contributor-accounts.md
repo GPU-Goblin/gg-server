@@ -46,3 +46,16 @@ someone quickly, and a contributor needs to see their machines.
   own session, a machine of another account refused, code replacement, suspension and
   reinstatement, sign-up closed by default), `gg-worker/tests/enroll.rs` (the real agent enrolls
   with its own session, then claims).
+
+## Addendum (2026-09-26): the same account as JSON, for the contributor's application
+
+The application (ADR-0043) signs its owner in without a browser, through `/contributor/v1`:
+`POST code {email}` (the same answer whether or not a code was sent), `POST session {email, code}`
+→ `{session: "ggp_…", expires_in_secs, email}` (403 on a wrong, expired or used code; five checks
+per code; the account is created by the first right code), `GET me` → the address, suspension and
+machines, `POST enrollment` → a new enrollment code (the previous one stops attaching machines),
+`POST logout`. The session is the same kind as the page's cookie, stored hashed, with the same
+lifetime (`email_login.session_ttl_secs`), but travels as a bearer token: no cookie, so no
+cross-site request can carry it, and these routes sit outside the forms' CSRF layer. They answer
+404 while contributor sign-up is closed. Tests: `tests/contributors.rs`
+(`the_application_signs_up_and_attaches_a_machine_with_json_alone`, closed by default).

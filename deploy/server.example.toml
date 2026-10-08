@@ -35,11 +35,15 @@ p2p_allow_private_addrs = false     # loopback/private announced addresses; refu
 # can validate.
 audit_rate = 0.25                   # can be changed at runtime: POST /v1/admin/config/audit-rate (D2)
 engine_check_rate = 0.1             # share of GPU-validated results recomputed again on the CPU (ADR-0031)
+replica_verification = true         # every task computed again by another contributor account and compared (ADR-0042)
+pairing_reserve_secs = 30           # the worker drawn for a replica is alone to be offered it this long
+spot_check_rate = 0.05              # share of replicated tasks with a third computation from the start (ADR-0042)
+probation_tasks = 20                # accepted computations before an account leaves probation (all spot-checked)
 step_cache_bytes = 4294967296       # optimizer state kept in memory between rounds (ADR-0036); 0 disables
 retention = true                    # remove settled rounds' intermediate artifacts (ADR-0040)
-retention_after_secs = 3600         # after a round closes
+retention_after_secs = 600          # after a round closes (and is settled)
 checkpoint_keep_every = 50          # weights kept every N steps (with step 0 and the current one)
-retention_interval_secs = 300
+retention_interval_secs = 60
 data_policy = "public-synthetic-only"  # or "research-any-data"; published by /v1/info, accepted when a project is created (D4)
 
 p2p_dial_back = true                # check an announced address accepts a connection before advertising it

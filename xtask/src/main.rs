@@ -3,6 +3,7 @@
 mod db;
 mod demo;
 mod release;
+mod windows;
 mod worker;
 
 use clap::{Parser, Subcommand};
@@ -27,6 +28,9 @@ enum Cmd {
     Demo(demo::DemoArgs),
     /// Build the distributed executables and sign a manifest of exactly what was built.
     Release(release::ReleaseArgs),
+    /// The Windows files of a release (cross-compiled in Docker, or native on Windows), added to
+    /// its unsigned manifest.
+    Windows(windows::WindowsArgs),
     /// Inventory of dependencies and licences of the whole workspace.
     Licenses {
         /// Write the inventory to this file instead of printing it.
@@ -85,6 +89,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Check => check(),
         Cmd::Demo(args) => demo::run(args),
         Cmd::Release(args) => release::run(args),
+        Cmd::Windows(args) => windows::run(args),
         Cmd::Licenses { out } => licenses(out.as_deref()),
     }
 }

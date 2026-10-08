@@ -1,0 +1,40 @@
+[package]
+name = "gg-node"
+description = "GPU Goblin lab node (ADR-0041): the scientist's machine holds and serves its runs' artifacts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gg-node"
+path = "src/bin/gg-node.rs"
+
+[dependencies]
+gg-core = { workspace = true }
+gg-protocol = { workspace = true }
+gg-client = { workspace = true, features = ["p2p"] }
+gg-compute = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+axum = { workspace = true }
+rustls = { workspace = true }
+tokio-util = { workspace = true }
+reqwest = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+gg-control = { path = "../gg-control" }
+gg-verifier = { path = "../gg-verifier" }
+gg-storage = { path = "../gg-storage", features = ["testing"] }
+tempfile = { workspace = true }
+hex = { workspace = true }
+sqlx = { workspace = true }

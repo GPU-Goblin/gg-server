@@ -338,7 +338,8 @@ pub async fn announce_capabilities(
 ) -> Result<(), StorageError> {
     sqlx::query(
         "UPDATE workers SET announced_ram_bytes = $2, announced_device_bytes = $3, announced_profile = $4,
-                announced_engine = $5, announced_kinds = $6, announced_at = now() WHERE id = $1",
+                announced_engine = $5, announced_kinds = $6, announced_serves_peers = $7,
+                announced_at = now() WHERE id = $1",
     )
     .bind(id.0)
     .bind(caps.ram_bytes)
@@ -346,6 +347,7 @@ pub async fn announce_capabilities(
     .bind(caps.profile)
     .bind(caps.engine.as_deref())
     .bind(&caps.kinds)
+    .bind(caps.serves_peers)
     .execute(c)
     .await?;
     Ok(())
@@ -383,6 +385,8 @@ pub async fn recent_capabilities(
                 profile: profile.unwrap_or(1),
                 engine,
                 kinds: kinds.unwrap_or_default(),
+                // Not recorded: planning looks at memory and profile only.
+                serves_peers: false,
             },
         )
         .collect())
@@ -765,6 +769,44 @@ pub async fn create_researcher_with_email(
     .execute(c)
     .await?;
     Ok(())
+}
+
+/// Create a researcher who asked for access from the public site: a verified e-mail address, the
+/// name to show, the laboratory and what they want to compute; admission pending.
+pub async fn create_access_request(
+    c: &mut PgConnection,
+    id: ResearcherId,
+    email: &str,
+    name: &str,
+    lab: &str,
+    purpose: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO researchers (id, display_name, email, email_verified_at, admission_state, lab, purpose, requested_at)
+         VALUES ($1, $2, $3, now(), 'pending', $4, $5, now())",
+    )
+    .bind(id.0)
+    .bind(name)
+    .bind(email)
+    .bind(lab)
+    .bind(purpose)
+    .execute(c)
+    .await?;
+    Ok(())
+}
+
+/// The access requests of researchers (laboratory, purpose), by id; empty for those without one.
+pub async fn access_requests(
+    c: &mut PgConnection,
+) -> Result<std::collections::HashMap<uuid::Uuid, (String, String)>, StorageError> {
+    Ok(sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+        "SELECT id, lab, purpose FROM researchers WHERE requested_at IS NOT NULL",
+    )
+    .fetch_all(c)
+    .await?
+    .into_iter()
+    .map(|(id, lab, purpose)| (id, (lab, purpose)))
+    .collect())
 }
 
 /// Record a new sign-in by e-mail.

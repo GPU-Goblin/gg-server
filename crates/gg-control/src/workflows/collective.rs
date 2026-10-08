@@ -99,6 +99,12 @@ pub struct GraphRunSpec {
     /// Their artifacts, by name.
     #[schema(value_type = Object)]
     pub dataset_refs: BTreeMap<String, ArtifactRef>,
+    /// A run a lab node steps may start from these weights (one `GGB1` bundle) held by the node,
+    /// instead of the seeded initialization; the node checks it against the description and cuts
+    /// it into shards at step 0 (ADR-0041). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub initial_checkpoint: Option<ArtifactRef>,
     /// Accelerator memory a task needs, estimated for the largest micro-batch with the chosen
     /// levers (`graph::memory::task_memory`). Only workers announcing at least this much are
     /// offered the tasks.
@@ -246,6 +252,15 @@ pub struct CreateCollectiveRequest {
     /// to merge them back).
     #[serde(default)]
     pub tile_max_param_bytes: Option<u64>,
+    /// Graph run a lab node steps: the tiling the node applied to `source_graph` to give `graph`
+    /// (the cutting by the node). The server checks it and records both.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub tiling: Option<Vec<gg_compute::graph::tiling::Tiled>>,
+    /// Graph run a lab node steps: the description before the node tiled it.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub source_graph: Option<ArtifactRef>,
     /// Graph run: segments of activation recomputation asked of every task (ADR-0019). `1` keeps
     /// every activation; above that, less memory for about a third more compute, same gradient.
     #[serde(default = "one_segment")]
@@ -271,6 +286,12 @@ pub struct CreateCollectiveRequest {
     pub max_round_retries: u32,
     #[serde(default)]
     pub priority: i32,
+    /// Graph run stepped by one of the researcher's lab nodes (ADR-0041): the node initializes
+    /// the weights from the seed, averages the accepted gradients, applies the optimizer step and
+    /// holds every checkpoint; the control plane stores none of it. Data-parallel runs over whole
+    /// datasets only, for now: no stages, no tiling, no supplied starting point.
+    #[serde(default)]
+    pub holder_node: Option<NodeId>,
 }
 fn default_optimizer() -> String {
     "adam".into()
@@ -294,6 +315,32 @@ async fn artifact_head(
     head: usize,
 ) -> Result<Vec<u8>, ApiError> {
     use tokio::io::AsyncReadExt;
+    if !state.objects().exists(&r.hash) && artifacts::held_by_node(tx, &r.hash).await?.is_some() {
+        // Held by a lab node (ADR-0041): the control plane has only the first bytes it declared.
+        let row = artifacts::get_artifact(tx, &r.hash)
+            .await?
+            .ok_or_else(|| ApiError::Unprocessable("artifact unknown".into()))?;
+        if row.size as u64 != r.size
+            || !artifacts::artifact_readable_by_project(tx, &r.hash, project).await?
+        {
+            return Err(ApiError::Forbidden(
+                "artifact not readable by this project or size mismatch".into(),
+            ));
+        }
+        let header = artifacts::node_header(tx, &r.hash)
+            .await?
+            .unwrap_or_default();
+        let want = head.min(r.size as usize);
+        if header.len() < want {
+            return Err(ApiError::Unprocessable(format!(
+                "artifact {} is held by a lab node, which declared {} of the {want} first bytes \
+                 needed here: upload it to the server instead",
+                r.hash,
+                header.len()
+            )));
+        }
+        return Ok(header[..want].to_vec());
+    }
     let row = artifacts::get_artifact(tx, &r.hash)
         .await?
         .ok_or_else(|| ApiError::Unprocessable("artifact unknown".into()))?;
@@ -351,6 +398,42 @@ async fn create_graph_run(
             "graph artifact size out of range".into(),
         ));
     }
+    if let Some(node) = req.holder_node {
+        // What a run stepped by a lab node supports for now (ADR-0041, A6).
+        let unsupported = [
+            (
+                req.stage_memory_bytes.is_some(),
+                "stage_memory_bytes (the node cuts the model: send the stage_bounds it computed)",
+            ),
+            (
+                req.tile_max_param_bytes.is_some(),
+                "tile_max_param_bytes (the node tiles the model: send the tiling it applied)",
+            ),
+            (
+                req.initial_parameters.is_some(),
+                "initial_parameters (send one initial_checkpoint bundle to the node)",
+            ),
+        ];
+        if let Some((_, what)) = unsupported.iter().find(|(on, _)| *on) {
+            return Err(ApiError::Unprocessable(format!(
+                "a run stepped by a lab node does not support {what} yet"
+            )));
+        }
+        if !state.config().p2p_enabled {
+            return Err(ApiError::Unprocessable(
+                "holder_node: peer distribution is disabled on this server".into(),
+            ));
+        }
+        let mut c = state.db().pool().acquire().await?;
+        let row = gg_storage::queries::nodes::get(&mut c, node).await?;
+        if row.is_none_or(|n| n.revoked_at.is_some())
+            || !gg_storage::queries::nodes::attached(&mut c, node, project).await?
+        {
+            return Err(ApiError::Unprocessable(
+                "holder_node: not an active lab node attached to this project".into(),
+            ));
+        }
+    }
     let mut tx = state.db().begin().await?;
     let proj = identities::get_project(&mut tx, project)
         .await?
@@ -373,9 +456,37 @@ async fn create_graph_run(
     let report = graph::validate(&model)
         .map_err(|e| ApiError::Unprocessable(format!("graph refused: {e}")))?;
     // Matrices tiled in the description (D3): the server rewrites the description and keeps it
-    // as a project artifact; the initial weights will be tiled the same way.
-    let source_model = model.clone();
-    let source_graph = graph_ref;
+    // as a project artifact; the initial weights will be tiled the same way. For a lab node's run,
+    // the node did it: the server checks that its tiling of the source gives the description.
+    let (source_model, source_graph) = match (&req.tiling, req.source_graph) {
+        (None, None) => (model.clone(), graph_ref),
+        (Some(tiled), Some(src)) if req.holder_node.is_some() && !tiled.is_empty() => {
+            if src.size == 0 || src.size > gtask::MAX_GRAPH_BYTES {
+                return Err(ApiError::Unprocessable(
+                    "source_graph size out of range".into(),
+                ));
+            }
+            let bytes = artifact_head(state, &mut tx, project, &src, src.size as usize).await?;
+            let submitted_source: graph::ModelGraphV1 = serde_json::from_slice(&bytes)
+                .map_err(|e| ApiError::Unprocessable(format!("source_graph: {e}")))?;
+            let source = graph::functions::inline(&submitted_source)
+                .map_err(|e| ApiError::Unprocessable(format!("source_graph refused: {e}")))?;
+            let tiled_again = graph::tiling::apply(&source, tiled)
+                .map_err(|e| ApiError::Unprocessable(format!("tiling: {e}")))?;
+            if tiled_again != model {
+                return Err(ApiError::Unprocessable(
+                    "tiling: the description is not source_graph tiled as announced".into(),
+                ));
+            }
+            (source, src)
+        }
+        _ => {
+            return Err(ApiError::Unprocessable(
+                "tiling and source_graph go together, for a run a lab node steps".into(),
+            ));
+        }
+    };
+    let node_tiled = req.tiling.clone().unwrap_or_default();
     let (model, report, tiling, rewritten) = match req.tile_max_param_bytes {
         Some(max) => {
             let (tiled, tiling) = graph::tiling::auto_tile(&model, max)
@@ -384,6 +495,7 @@ async fn create_graph_run(
                 .map_err(|e| ApiError::Unprocessable(format!("tiled graph refused: {e}")))?;
             (tiled, report, tiling, Some("tiling"))
         }
+        None if !node_tiled.is_empty() => (model, report, node_tiled, None),
         None => (model, report, Vec::new(), inlined.then_some("functions")),
     };
     // A rewritten description (tiles or inlined functions) is kept as a project artifact: it is
@@ -622,7 +734,7 @@ shard_bytes unset or set it to split the checkpoint",
     };
     let spec = GraphRunSpec {
         tiling: tiling.clone(),
-        source_graph: rewritten.is_some().then_some(source_graph),
+        source_graph: (rewritten.is_some() || !tiling.is_empty()).then_some(source_graph),
         stage_bounds,
         batch_inputs,
         dataset_parts: dataset_parts.clone(),
@@ -641,6 +753,7 @@ shard_bytes unset or set it to split the checkpoint",
         activation_bytes_per_example: report.activation_bytes_per_example,
         datasets: dataset_specs,
         dataset_refs: datasets.clone(),
+        initial_checkpoint: req.initial_checkpoint.filter(|_| req.holder_node.is_some()),
     };
     let cfg = CollectiveConfig {
         d_input: 0,
@@ -664,7 +777,27 @@ shard_bytes unset or set it to split the checkpoint",
     // parameter, or seeded by the protocol. Only one shard is held in memory at a time, except for
     // a single supplied bundle (at most 1 GiB).
     let mut weights = BTreeMap::new();
-    let single: Option<Named> = match &req.initial_checkpoint {
+    // A lab node's run: the node holds the bundle, checks it and cuts it at step 0; the server
+    // checks its size and that the node holds it, and never reads it.
+    if let (Some(node), Some(r)) = (req.holder_node, &req.initial_checkpoint) {
+        if r.size != gtask::checkpoint_bundle_size(&source_model) {
+            return Err(ApiError::Unprocessable(format!(
+                "initial_checkpoint is {} bytes, this graph's checkpoint is {}",
+                r.size,
+                gtask::checkpoint_bundle_size(&source_model)
+            )));
+        }
+        if artifacts::held_by_node(&mut tx, &r.hash).await? != Some(node) {
+            return Err(ApiError::Unprocessable(
+                "initial_checkpoint: send it to the node that steps the run".into(),
+            ));
+        }
+    }
+    let single: Option<Named> = match req
+        .initial_checkpoint
+        .as_ref()
+        .filter(|_| req.holder_node.is_none())
+    {
         Some(r) => {
             if req.initial_parameters.is_some() {
                 return Err(ApiError::Unprocessable(
@@ -718,7 +851,8 @@ shard_bytes unset or set it to split the checkpoint",
             ));
         }
     }
-    if weights.is_empty() {
+    // A lab node initializes the weights itself, from the same seed (ADR-0041).
+    if weights.is_empty() && req.holder_node.is_none() {
         for (i, shard) in plan.shards.iter().enumerate() {
             let mut part = Named::new();
             for name in &shard.params {
@@ -817,18 +951,24 @@ shard_bytes unset or set it to split the checkpoint",
         &serde_json::to_value(&ckpt).map_err(|e| ApiError::Internal(e.to_string()))?,
     )
     .await?;
-    cq::insert_checkpoint(
-        &mut tx,
-        run_id,
-        0,
-        &serde_json::to_value(&ckpt).map_err(|e| ApiError::Internal(e.to_string()))?,
-        None,
-    )
-    .await?;
-    let run = cq::get_run(&mut tx, run_id)
-        .await?
-        .ok_or_else(|| ApiError::Internal("run missing".into()))?;
-    open_round(state, &mut tx, &run, &cfg, &ckpt, 0, 1).await?;
+    match req.holder_node {
+        // The node publishes step 0 once it has drawn the weights; round 0 opens then.
+        Some(node) => cq::set_run_holder(&mut tx, run_id, node.0).await?,
+        None => {
+            cq::insert_checkpoint(
+                &mut tx,
+                run_id,
+                0,
+                &serde_json::to_value(&ckpt).map_err(|e| ApiError::Internal(e.to_string()))?,
+                None,
+            )
+            .await?;
+            let run = cq::get_run(&mut tx, run_id)
+                .await?
+                .ok_or_else(|| ApiError::Internal("run missing".into()))?;
+            open_round(state, &mut tx, &run, &cfg, &ckpt, 0, 1).await?;
+        }
+    }
     misc::audit(&mut tx, &format!("researcher:{researcher}"), "collective.create", &run_id.to_string(), serde_json::json!({ "project_id": project, "rounds": cfg.rounds, "tasks_per_round": cfg.tasks_per_round, "kind": gtask::KIND, "parameters": report.parameters })).await?;
     let _ = optim;
     tx.commit().await?;
@@ -1591,6 +1731,10 @@ pub(crate) async fn open_round(
         &format!("{}-round{step}-a{attempt}", run.name),
     )
     .await?;
+    // A run a lab node steps: the gradients go to the node (ADR-0041).
+    if let Some(node) = run.holder_node {
+        jobs::set_output_holder(tx, job_id, NodeId(node)).await?;
+    }
     let mut inputs = BTreeMap::new();
     for (name, r) in &ckpt.weights {
         inputs.insert(name.clone(), *r);
@@ -1618,13 +1762,25 @@ pub(crate) async fn open_round(
             }
         }
     }
+    // A lab node's run: the node cut each task's rows (and holds them); the server reads none.
+    let node_rows = match (run.holder_node, &cfg.graph) {
+        (Some(_), Some(g)) if g.batch_inputs => {
+            Some(super::node_step::rows_of(tx, run.id, step).await?)
+        }
+        _ => None,
+    };
     for (i, (start, count)) in slices(cfg.batch_per_round, cfg.tasks_per_round)
         .into_iter()
         .enumerate()
     {
         // Micro-batch selected here (C4): the task downloads only its own rows.
         let mut inputs = inputs.clone();
-        if let Some(g) = cfg.graph.as_ref().filter(|g| g.batch_inputs) {
+        if let Some(rows) = &node_rows {
+            let mine = rows
+                .get(i)
+                .ok_or_else(|| ApiError::Internal(format!("no rows for task {i}")))?;
+            inputs.extend(mine.iter().map(|(k, v)| (k.clone(), *v)));
+        } else if let Some(g) = cfg.graph.as_ref().filter(|g| g.batch_inputs) {
             let idx = gtask::round_indices(seed, cfg.total_examples, start, count);
             for d in &g.datasets {
                 let parts = match g.dataset_parts.get(&d.name) {
@@ -1758,6 +1914,11 @@ pub async fn create_run(
     }
     if req.graph.is_some() {
         return create_graph_run(state, researcher, project, req).await;
+    }
+    if req.holder_node.is_some() {
+        return Err(ApiError::Unprocessable(
+            "a lab node steps graph runs only".into(),
+        ));
     }
     let (Some(train_x), Some(train_y), Some(d_hidden)) = (req.train_x, req.train_y, req.d_hidden)
     else {
@@ -2137,7 +2298,8 @@ async fn process_round(state: &AppState, round_id: Uuid) -> Result<bool, ApiErro
         let job = round.job_id;
         return fail_round(state, tx, run, cfg, round, vec![job]).await;
     }
-    if !states.iter().all(|s| *s == TaskState::Accepted) {
+    // Every task accepted: a lab node steps its own run (ADR-0041), the coordinator otherwise.
+    if !states.iter().all(|s| *s == TaskState::Accepted) || run.holder_node.is_some() {
         tx.rollback().await?;
         return Ok(false);
     }
@@ -2357,6 +2519,8 @@ pub(crate) async fn commit_step(
 
 /// One coordinator pass over open rounds.
 pub async fn coordinator_once(state: &AppState) -> Result<usize, ApiError> {
+    // Computations compared first (ADR-0042): what they accept lets rounds advance.
+    let compared = super::replicas::compare_once(state).await?;
     let ids: Vec<Uuid> = {
         let mut c = state
             .db()
@@ -2384,7 +2548,7 @@ pub async fn coordinator_once(state: &AppState) -> Result<usize, ApiError> {
             }
         }
     }
-    Ok(n)
+    Ok(n + compared)
 }
 
 /// Coordinator loop. A pass runs as soon as a submission or a decision is recorded

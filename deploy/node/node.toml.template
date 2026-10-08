@@ -1,0 +1,25 @@
+# GPU Goblin lab node (gg-node). Written by install.sh; yours to edit, never overwritten.
+# Reference: ADR-0041 and deploy/node/INSTALL.md.
+
+key_path = "@DATA_DIR@/node.key"
+state_dir = "@DATA_DIR@/state"
+
+# The signed list of servers, and the release keys trusted to sign it (the same key as the
+# releases you installed from).
+directory_url = "@DIRECTORY_URL@"
+directory_keys = ["@DIRECTORY_KEY@"]
+
+# The local API the Python library talks to. This machine only by default. To serve the
+# laboratory's network, listen on its address and give a certificate:
+#   api_listen = "0.0.0.0:7450"
+#   api_tls_cert = "/path/fullchain.pem"
+#   api_tls_key = "/path/privkey.pem"
+api_listen = "127.0.0.1:7450"
+
+# Largest dataset accepted through the local API (bytes).
+max_data_bytes = 68719476736
+
+# Peer to peer: workers fetch datasets and checkpoints from this machine, and it fetches their
+# outputs. The port must be reachable from the Internet (forward it on the router, or use IPv6).
+p2p_listen = "0.0.0.0:7451"
+p2p_advertise = ""

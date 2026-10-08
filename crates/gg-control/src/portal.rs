@@ -70,7 +70,7 @@ fn esc(s: &str) -> String {
 
 fn page(state: &AppState, title: &str, body: &str) -> Html<String> {
     let banner = if state.orcid().is_simulated() || state.mailer().is_simulated() {
-        "<p class=\"warn\">Development mode: <strong>simulated</strong> sign-in (ORCID or e-mail). This is not real authentication.</p>"
+        "<p class=\"warn\">Development mode: sign-in (ORCID or e-mail) is simulated and does not verify who you are.</p>"
     } else {
         ""
     };
@@ -142,9 +142,9 @@ async fn index(
         None => None,
     };
     let body = match session {
-        None if !state.orcid().is_enabled() && !state.mailer().is_enabled() => "<p>Researcher access: no sign-in method is configured on this server (see <code>[orcid]</code> and <code>[email_login]</code> in the configuration). API tokens are issued by an operator.</p>".to_owned(),
+        None if !state.orcid().is_enabled() && !state.mailer().is_enabled() => "<p>Signing in is not available on this server. An operator can give you an API token.</p>".to_owned(),
         None => {
-            let mut b = "<p>Researcher access: signing in proves who you are; admission (and then projects) is a separate decision made by an operator.</p>".to_owned();
+            let mut b = "<p>Sign in to see your projects. You can submit computations once an operator has approved your access.</p>".to_owned();
             if state.orcid().is_enabled() {
                 b.push_str("<p><a href=\"/portal/login\"><button type=\"button\">Sign in with ORCID</button></a></p>");
             }
@@ -161,36 +161,54 @@ async fn index(
             for p in &projects {
                 let role = identities::membership_role(&mut c, ProjectId(p.id), ResearcherId(r.id)).await?.map(|x| x.to_string()).unwrap_or_default();
                 let b = gg_ledger::budget(&mut c, ProjectId(p.id)).await?;
+                let project_state = match p.state.as_str() {
+                    "active" => "Active",
+                    "suspended" => "Suspended",
+                    "closed" => "Closed",
+                    other => other,
+                };
+                let role_label = match role.as_str() {
+                    "owner" => "Owner",
+                    "member" => "Member",
+                    "viewer" => "Read only",
+                    other => other,
+                };
                 rows.push_str(&format!(
                     "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{} / {} / {}</td></tr>",
-                    p.id, esc(&p.name), esc(&p.state), esc(&role), b.available, b.reserved, b.spent
+                    p.id, esc(&p.name), esc(project_state), esc(role_label), b.available, b.reserved, b.spent
                 ));
             }
+            let projects_content = if projects.is_empty() {
+                "<p>No project is linked to your account yet.</p>".to_owned()
+            } else {
+                format!("<table><tr><th>ID</th><th>Name</th><th>State</th><th>Role</th><th>Test credits (available / reserved / spent)</th></tr>{rows}</table>")
+            };
             let admission_text = match admission {
-                AdmissionState::Approved => "<span style=\"color:green\">approved</span>".to_owned(),
-                AdmissionState::Pending => "<span style=\"color:#b36b00\">pending review by an operator</span> — no submissions possible yet".to_owned(),
-                other => format!("<span style=\"color:red\">{other}</span>"),
+                AdmissionState::Approved => "<span style=\"color:green\">approved</span>. You can create a token to use the command line.".to_owned(),
+                AdmissionState::Pending => "<span style=\"color:#b36b00\">pending review</span>. An operator must approve your access before any submission.".to_owned(),
+                AdmissionState::Suspended => "<span style=\"color:red\">suspended</span>. You cannot submit computations for now.".to_owned(),
+                AdmissionState::Rejected => "<span style=\"color:red\">rejected</span>. You cannot submit computations.".to_owned(),
             };
             let token_form = if admission == AdmissionState::Approved {
-                "<form method=\"post\" action=\"/portal/token\"><button type=\"submit\">Create an API token for the CLI (shown only once)</button></form>"
+                "<form method=\"post\" action=\"/portal/token\"><button type=\"submit\">Create an API token</button></form><p><small>The token will be shown only once.</small></p>"
             } else {
                 ""
             };
             let identity = match (&r.orcid, identities::researcher_emails(&mut c).await?.get(&r.id)) {
-                (Some(o), _) => format!("<p>ORCID iD: <a href=\"https://orcid.org/{o}\"><code>{o}</code></a></p>", o = esc(o)),
-                (None, Some(e)) => format!("<p>E-mail: <code>{}</code> (verified)</p>", esc(e)),
+                (Some(o), _) => format!("<p>Your ORCID iD: <a href=\"https://orcid.org/{o}\"><code>{o}</code></a></p>", o = esc(o)),
+                (None, Some(e)) => format!("<p>Your e-mail: <code>{}</code> (verified)</p>", esc(e)),
                 (None, None) => String::new(),
             };
             format!(
                 "<h2>{name}</h2>{identity}\
-<p>Admission: {admission_text}</p>{token_form}\
-<h3>Projects</h3><table><tr><th>id</th><th>name</th><th>state</th><th>role</th><th>budget available / reserved / spent (TC)</th></tr>{rows}</table>\
+<p>Your access: {admission_text}</p>{token_form}\
+<h3>Your projects</h3>{projects_content}\
 <form method=\"post\" action=\"/portal/logout\"><button type=\"submit\">Sign out</button></form>",
                 name = esc(&r.display_name),
             )
         }
     };
-    Ok(page(&state, "Portal", &body))
+    Ok(page(&state, "Researcher space", &body))
 }
 
 async fn login(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -239,7 +257,22 @@ async fn callback(
     Query(q): Query<CallbackQuery>,
 ) -> Result<Response, ApiError> {
     if let Some(e) = q.error {
-        return Ok(page(&state, "Sign-in refused", &format!("<p>ORCID refused the sign-in: <code>{}</code>.</p><p><a href=\"/portal\">Back</a></p>", esc(&e))).into_response());
+        let (title, message) = if e == "access_denied" {
+            (
+                "Sign-in cancelled",
+                "You did not allow the sign-in with ORCID.".to_owned(),
+            )
+        } else {
+            (
+                "Sign-in failed",
+                format!(
+                    "The sign-in with ORCID did not go through (code: {}).",
+                    esc(&e)
+                ),
+            )
+        };
+        let body = format!("<p>{message}</p><p><a href=\"/portal\">Back to the start</a></p>");
+        return Ok(page(&state, title, &body).into_response());
     }
     let (Some(code), Some(st)) = (q.code, q.state) else {
         return Err(ApiError::BadRequest("missing code or state".into()));
@@ -376,8 +409,8 @@ async fn issue_token(
     .await?;
     tx.commit().await?;
     let body = format!(
-        "<h2>API token created</h2><p>Copy it now; it will not be shown again:</p><pre><code>{t}</code></pre>\
-<p>Usage: <code>gg auth login --server {base} --token …</code></p><p><a href=\"/portal\">Back</a></p>",
+        "<h2>API token created</h2><p>This token is shown only once. Copy it and keep it somewhere safe:</p><pre><code>{t}</code></pre>\
+<p>To use it with the command line: <code>gg auth login --server {base} --token &lt;your_token&gt;</code></p><p><a href=\"/portal\">Back</a></p>",
         t = esc(&token),
         base = esc(&state.config().public_url)
     );
@@ -397,14 +430,14 @@ async fn dev_authorize_form(
         return Err(ApiError::NotFound("simulator disabled".into()));
     }
     let body = format!(
-        "<h2>ORCID simulator (development)</h2><form method=\"post\" action=\"/portal/dev/orcid/authorize\">\
+        "<h2>Simulated ORCID sign-in</h2><p>This page is for local testing. It does not verify who you are.</p><form method=\"post\" action=\"/portal/dev/orcid/authorize\">\
 <input type=\"hidden\" name=\"state\" value=\"{st}\">\
 <p><label>ORCID iD <input name=\"orcid\" value=\"0000-0002-1825-0097\" size=\"22\"></label></p>\
-<p><label>Name <input name=\"name\" value=\"Josiah Carberry\" size=\"30\"></label></p>\
-<button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button> <button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button></form>",
+<p><label>Display name <input name=\"name\" value=\"Josiah Carberry\" size=\"30\"></label></p>\
+<button type=\"submit\" name=\"decision\" value=\"allow\">Continue</button> <button type=\"submit\" name=\"decision\" value=\"deny\">Cancel</button></form>",
         st = esc(&q.state)
     );
-    Ok(page(&state, "ORCID simulator", &body).into_response())
+    Ok(page(&state, "Simulated ORCID sign-in", &body).into_response())
 }
 
 #[derive(Deserialize)]
@@ -828,6 +861,316 @@ async fn contribute_logout(
         set_cookie(&state, CONTRIBUTOR_COOKIE, "", 0),
     );
     Ok(resp)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The same contributor account as JSON, for the contributor's application (ADR-0043): no page, no
+// cookie; the session travels as a bearer token (so no cross-site request can use it, and the
+// CSRF layer of the forms does not apply). Same rules as the forms: the same answer whether or not
+// a code was sent, five checks per code, the account created on the first right code.
+
+fn contributor_bearer(headers: &HeaderMap) -> Option<String> {
+    let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let t = v.strip_prefix("Bearer ")?.trim();
+    (t.starts_with(PORTAL_SESSION_PREFIX) && t.len() <= 128).then(|| t.to_owned())
+}
+
+async fn contributor_by_bearer(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<gg_storage::queries::contributors::ContributorRow, ApiError> {
+    let token = contributor_bearer(headers).ok_or(ApiError::Unauthorized)?;
+    let mut c = state.db().pool().acquire().await?;
+    let id = gg_storage::queries::contributors::lookup_session(&mut c, &token_hash(&token))
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    gg_storage::queries::contributors::get(&mut c, id)
+        .await?
+        .ok_or(ApiError::Unauthorized)
+}
+
+#[derive(Deserialize)]
+struct CodeRequest {
+    email: String,
+}
+
+async fn api_code(
+    State(state): State<AppState>,
+    axum::Json(r): axum::Json<CodeRequest>,
+) -> Result<Response, ApiError> {
+    contributor_signup_enabled(&state)?;
+    let email = normalize_email(&r.email)
+        .ok_or_else(|| ApiError::Unprocessable("this is not a valid e-mail address".into()))?;
+    crate::workflows::contributors::send_code(&state, &email).await?;
+    Ok(axum::Json(serde_json::json!({
+        "email": email,
+        "valid_secs": crate::workflows::contributors::CODE_TTL_SECS,
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct SessionRequest {
+    email: String,
+    code: String,
+}
+
+async fn api_session(
+    State(state): State<AppState>,
+    axum::Json(r): axum::Json<SessionRequest>,
+) -> Result<Response, ApiError> {
+    contributor_signup_enabled(&state)?;
+    let (Some(email), true) = (normalize_email(&r.email), r.code.trim().len() <= 16) else {
+        return Err(ApiError::Unprocessable(
+            "invalid e-mail address or code".into(),
+        ));
+    };
+    let Some(account) =
+        crate::workflows::contributors::verify_code(&state, &email, &r.code).await?
+    else {
+        return Err(ApiError::Forbidden(
+            "this code is wrong, expired or already used".into(),
+        ));
+    };
+    let ttl = state.config().email_login.session_ttl_secs;
+    let session = new_token(PORTAL_SESSION_PREFIX)?;
+    let mut c = state.db().pool().acquire().await?;
+    gg_storage::queries::contributors::create_session(&mut c, &token_hash(&session), account, ttl)
+        .await?;
+    Ok(axum::Json(serde_json::json!({
+        "session": session,
+        "expires_in_secs": ttl,
+        "email": email,
+    }))
+    .into_response())
+}
+
+async fn api_me(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    contributor_signup_enabled(&state)?;
+    let account = contributor_by_bearer(&state, &headers).await?;
+    let mut c = state.db().pool().acquire().await?;
+    let machines = gg_storage::queries::contributors::machines(&mut c, account.id).await?;
+    let machines: Vec<serde_json::Value> = machines
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "worker_id": m.id,
+                "name": m.display_name,
+                "working": m.authorized,
+                "last_seen_at": m.last_seen_at.map(|t| t.to_string()),
+                "accepted": m.accepted,
+            })
+        })
+        .collect();
+    Ok(axum::Json(serde_json::json!({
+        "email": account.email,
+        "suspended": account.suspended_at.is_some(),
+        "suspended_reason": account.suspended_reason,
+        "machines": machines,
+    }))
+    .into_response())
+}
+
+async fn api_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    contributor_signup_enabled(&state)?;
+    let account = contributor_by_bearer(&state, &headers).await?;
+    if account.suspended_at.is_some() {
+        return Err(ApiError::Forbidden("account suspended".into()));
+    }
+    let token = crate::workflows::contributors::new_enrollment_token(&state, account.id).await?;
+    Ok(axum::Json(serde_json::json!({
+        "enrollment_token": token,
+        "install_command": install_command(&state, &token),
+    }))
+    .into_response())
+}
+
+async fn api_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if let Some(token) = contributor_bearer(&headers) {
+        let mut c = state.db().pool().acquire().await?;
+        gg_storage::queries::contributors::revoke_session(&mut c, &token_hash(&token)).await?;
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// The same account's researcher side (one account per person, the owner's decision): the
+// researcher record of the account's verified address, an access request reviewed by an
+// operator, and API tokens once admitted. Same rules as the portal: admission is a human decision,
+// the address's domain must be accepted, a token is shown once.
+
+/// The researcher record of the signed-in account, by its verified address.
+async fn account_researcher(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<
+    (
+        gg_storage::queries::contributors::ContributorRow,
+        Option<gg_storage::models::ResearcherRow>,
+    ),
+    ApiError,
+> {
+    let account = contributor_by_bearer(state, headers).await?;
+    let mut c = state.db().pool().acquire().await?;
+    let researcher = identities::get_researcher_by_email(&mut c, &account.email).await?;
+    Ok((account, researcher))
+}
+
+async fn api_research(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    contributor_signup_enabled(&state)?;
+    let (_, researcher) = account_researcher(&state, &headers).await?;
+    let Some(r) = researcher else {
+        return Ok(axum::Json(serde_json::json!({ "status": "none" })).into_response());
+    };
+    let mut c = state.db().pool().acquire().await?;
+    let mut projects = Vec::new();
+    for p in identities::list_projects_for(&mut c, ResearcherId(r.id)).await? {
+        let role = identities::membership_role(&mut c, ProjectId(p.id), ResearcherId(r.id))
+            .await?
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        let b = gg_ledger::budget(&mut c, ProjectId(p.id)).await?;
+        projects.push(serde_json::json!({
+            "project_id": p.id,
+            "name": p.name,
+            "state": p.state,
+            "role": role,
+            "available": b.available.to_string(),
+            "reserved": b.reserved.to_string(),
+            "spent": b.spent.to_string(),
+        }));
+    }
+    Ok(axum::Json(serde_json::json!({
+        "status": r.admission_state,
+        "name": r.display_name,
+        "projects": projects,
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct AccessRequest {
+    name: String,
+    lab: String,
+    purpose: String,
+}
+
+/// A line of text a person typed: trimmed, within bounds, no control characters.
+fn typed(s: &str, min: usize, max: usize) -> Option<String> {
+    let t = s.trim();
+    let n = t.chars().count();
+    (n >= min && n <= max && !t.chars().any(|c| c.is_control() && c != '\n')).then(|| t.to_owned())
+}
+
+async fn api_research_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(q): axum::Json<AccessRequest>,
+) -> Result<Response, ApiError> {
+    contributor_signup_enabled(&state)?;
+    let (account, researcher) = account_researcher(&state, &headers).await?;
+    if account.suspended_at.is_some() {
+        return Err(ApiError::Forbidden("account suspended".into()));
+    }
+    if let Some(r) = researcher {
+        return Err(ApiError::Conflict(format!(
+            "access already requested: {}",
+            r.admission_state
+        )));
+    }
+    let (Some(name), Some(lab), Some(purpose)) = (
+        typed(&q.name, 2, 100),
+        typed(&q.lab, 2, 200),
+        typed(&q.purpose, 20, 2000),
+    ) else {
+        return Err(ApiError::Unprocessable(
+            "name (2-100 characters), laboratory (2-200) and purpose (20-2000) are required".into(),
+        ));
+    };
+    if !email_domain_allowed(&account.email, &state.config().email_login.allowed_domains) {
+        return Err(ApiError::Forbidden(
+            "researcher access is not open to this address's domain".into(),
+        ));
+    }
+    let id = ResearcherId(uuid::Uuid::now_v7());
+    let mut tx = state.db().begin().await?;
+    identities::create_access_request(&mut tx, id, &account.email, &name, &lab, &purpose).await?;
+    misc::audit(
+        &mut tx,
+        "portal",
+        "researcher.access_request",
+        &id.to_string(),
+        serde_json::json!({ "email": account.email, "lab": lab }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(axum::Json(serde_json::json!({ "status": "pending", "name": name })).into_response())
+}
+
+async fn api_research_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    contributor_signup_enabled(&state)?;
+    let (_, researcher) = account_researcher(&state, &headers).await?;
+    let r = researcher.ok_or_else(|| ApiError::Forbidden("no researcher access".into()))?;
+    let admission = r
+        .admission()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if admission != AdmissionState::Approved {
+        return Err(ApiError::Forbidden(format!("admission is {admission}")));
+    }
+    let token = new_token(API_TOKEN_PREFIX)?;
+    let mut tx = state.db().begin().await?;
+    identities::create_token(
+        &mut tx,
+        &token_hash(&token),
+        "researcher",
+        Some(ResearcherId(r.id)),
+        "account",
+        None,
+    )
+    .await?;
+    misc::audit(
+        &mut tx,
+        "portal",
+        "researcher.token.create",
+        &r.id.to_string(),
+        serde_json::json!({ "from": "account" }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(axum::Json(serde_json::json!({
+        "token": token,
+        "server": state.config().public_url,
+    }))
+    .into_response())
+}
+
+/// The contributor account as JSON (mounted at `/contributor/v1`), for the application.
+pub fn contributor_api(state: AppState) -> Router {
+    Router::new()
+        .route("/contributor/v1/code", post(api_code))
+        .route("/contributor/v1/session", post(api_session))
+        .route("/contributor/v1/me", get(api_me))
+        .route("/contributor/v1/enrollment", post(api_enrollment))
+        .route("/contributor/v1/logout", post(api_logout))
+        .route("/contributor/v1/research", get(api_research))
+        .route(
+            "/contributor/v1/research/request",
+            post(api_research_request),
+        )
+        .route("/contributor/v1/research/token", post(api_research_token))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(16 * 1024))
+        .with_state(state)
 }
 
 /// Development only: the messages the simulated mailer kept.

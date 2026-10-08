@@ -174,6 +174,8 @@ pub struct WorkerCapabilities {
     pub engine: Option<String>,
     /// Compute kinds the worker claims.
     pub kinds: Vec<String>,
+    /// The worker serves its outputs to peers: it may take tasks whose outputs a lab node pulls.
+    pub serves_peers: bool,
 }
 
 /// Insert a queued task.
@@ -206,7 +208,7 @@ pub async fn insert_task(c: &mut PgConnection, t: &NewTask<'_>) -> Result<(), St
     Ok(())
 }
 
-const TASK_COLS: &str = "id, job_id, project_id, experiment_id, index_in_job, compute_kind, spec_hash, definition_hash, spec_cbor, state, generation, attempts_made, max_attempts, priority, reward_primary, verification_cost, est_cpu_secs, created_at, updated_at";
+pub(crate) const TASK_COLS: &str = "id, job_id, project_id, experiment_id, index_in_job, compute_kind, spec_hash, definition_hash, spec_cbor, state, generation, attempts_made, max_attempts, priority, reward_primary, verification_cost, est_cpu_secs, created_at, updated_at, replica_of, replica_seq, compare_family";
 
 /// Get a task.
 pub async fn get_task(c: &mut PgConnection, id: TaskId) -> Result<Option<TaskRow>, StorageError> {
@@ -254,7 +256,10 @@ pub async fn lock_tasks_of_job(
 /// Select one assignable task compatible with `kinds` and with what the worker announced (memory,
 /// profile), skipping rows locked by concurrent claims, rows in `exclude` (already examined in this
 /// transaction) and tasks on which `worker` already had an attempt rejected by a validator (a
-/// rejected worker never gets the same task again).
+/// rejected worker never gets the same task again). Of the computations of one task (ADR-0042), a
+/// contributor account (a worker without one is its own) takes one only, and a computation drawn
+/// for a given worker is offered to it alone until its reservation ends, unless that worker is
+/// busy with another computation.
 pub async fn claim_candidate(
     c: &mut PgConnection,
     worker: WorkerId,
@@ -264,10 +269,34 @@ pub async fn claim_candidate(
 ) -> Result<Option<TaskRow>, StorageError> {
     Ok(sqlx::query_as::<_, TaskRow>(sqlx::AssertSqlSafe(format!(
         "SELECT {TASK_COLS} FROM tasks t WHERE t.state = 'queued' AND t.compute_kind = ANY($1) AND NOT (t.id = ANY($2))
-           AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.task_id = t.id AND a.worker_id = $3 AND a.state = 'rejected')
+           AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.task_id = t.id AND a.worker_id = $3
+                           AND (a.state = 'rejected' OR a.outputs_not_pulled))
            AND ($4::bigint IS NULL OR t.required_ram_bytes <= $4)
            AND ($5::bigint IS NULL OR t.required_device_bytes <= $5)
            AND t.required_profile <= $6
+           AND ($7 OR NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = t.job_id AND j.output_holder IS NOT NULL))
+           AND (t.designated_worker IS NULL OR t.designated_until <= now() OR t.designated_worker = $3
+                -- The worker drawn is busy: the computation does not wait for it.
+                OR EXISTS (SELECT 1 FROM attempts da
+                            WHERE da.worker_id = t.designated_worker AND da.state = 'active')
+                -- Its account has since computed another computation of the task: it never will.
+                OR EXISTS (
+                    SELECT 1 FROM tasks g JOIN attempts ga ON ga.task_id = g.id
+                      JOIN workers gw ON gw.id = ga.worker_id
+                      JOIN workers dw ON dw.id = t.designated_worker
+                     WHERE (g.id = COALESCE(t.replica_of, t.compare_family, t.id)
+                            OR g.replica_of = COALESCE(t.replica_of, t.compare_family, t.id)
+                            OR g.compare_family = COALESCE(t.replica_of, t.compare_family, t.id))
+                       AND g.id <> t.id
+                       AND COALESCE(gw.contributor_id, gw.id) = COALESCE(dw.contributor_id, dw.id)))
+           AND NOT EXISTS (
+               SELECT 1 FROM tasks f JOIN attempts fa ON fa.task_id = f.id JOIN workers fw ON fw.id = fa.worker_id
+                WHERE (f.id = COALESCE(t.replica_of, t.compare_family, t.id)
+                       OR f.replica_of = COALESCE(t.replica_of, t.compare_family, t.id)
+                       OR f.compare_family = COALESCE(t.replica_of, t.compare_family, t.id))
+                  AND f.id <> t.id
+                  AND COALESCE(fw.contributor_id, fw.id) =
+                      (SELECT COALESCE(me.contributor_id, me.id) FROM workers me WHERE me.id = $3))
          ORDER BY t.priority DESC, t.created_at ASC LIMIT 1 FOR UPDATE OF t SKIP LOCKED"
     )))
     .bind(kinds)
@@ -276,8 +305,39 @@ pub async fn claim_candidate(
     .bind(caps.ram_bytes)
     .bind(caps.device_bytes)
     .bind(caps.profile)
+    .bind(caps.serves_peers)
     .fetch_optional(c)
     .await?)
+}
+
+/// Make `node` the holder of a job's outputs (ADR-0041): its workers keep them and the node pulls
+/// them.
+pub async fn set_output_holder(
+    c: &mut PgConnection,
+    job: JobId,
+    node: NodeId,
+) -> Result<(), StorageError> {
+    sqlx::query("UPDATE jobs SET output_holder = $2 WHERE id = $1")
+        .bind(job.0)
+        .bind(node.0)
+        .execute(c)
+        .await?;
+    Ok(())
+}
+
+/// The lab node that pulls a job's outputs, if one does.
+pub async fn output_holder(
+    c: &mut PgConnection,
+    job: Uuid,
+) -> Result<Option<NodeId>, StorageError> {
+    Ok(
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT output_holder FROM jobs WHERE id = $1")
+            .bind(job)
+            .fetch_optional(c)
+            .await?
+            .flatten()
+            .map(NodeId),
+    )
 }
 
 /// Queued tasks of `kinds` that no announced capability can run, with the largest requirement:

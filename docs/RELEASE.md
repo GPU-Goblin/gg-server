@@ -25,6 +25,11 @@ any of the downloaded files to do so**.
 | `gg-worker`, `gg-executor` | build (gg-worker, CPU) | contributor binaries |
 | `gg-worker-gpu`, `gg-executor-gpu` | build (gg-worker, `--features gg-worker/gpu`) | GPU (Vulkan) build; install.sh installs them as `gg-worker`/`gg-executor` |
 | `gg-executor-cuda` | build (gg-worker, `--bin gg-executor --features gg-worker/cuda`, `LIBTORCH` = the pinned archive) | native CUDA executor; `install.sh --cuda` pairs it with `gg-worker-gpu` (ADR-0039) |
+| `gg-worker-windows.exe`, `gg-executor-windows.exe` | `cargo xtask windows` (CPU) | contributor binaries for Windows 10/11 x64; the Windows installer installs them as `gg-worker.exe`/`gg-executor.exe` (ADR-0045) |
+| `gg-worker-gpu-windows.exe`, `gg-executor-gpu-windows.exe` | `cargo xtask windows` (`gpu`) | Vulkan build for Windows |
+| `gg-executor-cuda-windows.exe` | `cargo xtask windows` (`cuda`, against the archive pinned by `libtorch-windows.sha256`) | native CUDA executor for Windows; the installer pairs it with `gg-worker-gpu-windows.exe` |
+| `libtorch-windows.sha256` | `deploy/worker/` | address, size and SHA-256 of the official Windows LibTorch archive: the Windows installer downloads it from PyTorch and refuses any other bytes. Not redistributed. LibTorch also needs Microsoft's Visual C++ runtime, which the installer takes from Microsoft when missing (signature checked by Windows, administrator's approval) |
+| `gg-desk-windows.exe`, `GPUGoblinSetup.exe` | `cargo xtask windows` | the Windows application, which is also its installer (the same bytes under two names: the site offers `GPUGoblinSetup.exe`). It carries the release key of `install.sh` and the network, compiled in: it is the root of trust on Windows, as `install.sh` is on Linux |
 | `libtorch.sha256` | `deploy/worker/` | address, size and SHA-256 of the official LibTorch archive: `install.sh --cuda` downloads it from PyTorch and refuses any other bytes. The archive itself is not redistributed |
 | `install.sh`, `worker.toml.template`, `gg-worker.service` | `deploy/worker/` | contributor kit, covered by the same signature |
 | `release.unsigned.json` | build | manifest: version, commit(s), toolchain, date, network, name/size/SHA-256 of every file |
@@ -68,6 +73,8 @@ debuginfo`: 17 MB instead of 147 MB for `gg-worker`, symbols kept); neither has 
    LIBTORCH="$RUNNER_TEMP/libtorch" cargo build --manifest-path gg-worker/Cargo.toml --release --bin gg-executor \
      --features gg-worker/cuda --target-dir target-cuda
    cp target-cuda/release/gg-executor dist/gg-executor-cuda
+   # Windows (ADR-0045): cross-compiled in Docker (cargo-xwin, pinned image), added to the manifest.
+   GG_WORKER_DIR=gg-worker cargo xtask windows --network gg-beta-1 --out dist
    cp gg-worker/deploy/worker/{install.sh,worker.toml.template,gg-worker.service,libtorch.sha256} dist/
    dist/gg release add dist/release.unsigned.json gg-worker-gpu gg-executor-gpu gg-executor-cuda libtorch.sha256 \
      install.sh worker.toml.template gg-worker.service
@@ -108,7 +115,8 @@ ssh-keygen -lf <(echo "ssh-ed25519 AAAA...")      # its SHA256 fingerprint: the 
 ```
 
 Write the allowed_signers line into `deploy/worker/install.sh` (`RELEASE_ALLOWED_SIGNERS`) and into
-`/etc/gpu-goblin/allowed_signers` on the server before the first tag, and publish the fingerprint
+`/etc/gpu-goblin/allowed_signers` on the server before the first tag (`cargo xtask windows` compiles
+the same line into the Windows application, and refuses to build while it is the placeholder), and publish the fingerprint
 through a channel that does not depend on the repository (the lab's page, a signed message, in
 person). A second copy of the key stick, kept elsewhere, avoids losing the key with the stick.
 
@@ -144,6 +152,13 @@ refused; in every refused case nothing is installed. An update to a second signe
 first one next to it and the contributor's configuration, and an installer carrying another key was
 refused by the pin.
 
+Windows rehearsed on 2026-10-08 (Windows 11 virtual machine, throwaway key): `cargo xtask release`
+then `cargo xtask windows --allowed-signers <throwaway>` then the kit, signed: 17 files, verified by
+`ssh-keygen` and `sha256sum`; `GPUGoblinSetup.exe` downloaded from the release and run in the
+user's session installed the worker, `doctor` passed, and later signed versions replaced a running
+one (stopped, its folder removed) without touching the configuration. The application built
+without a key refuses to install anything.
+
 ## Revocation policy
 
 - Revocation is a decision **about the key**, not about the bytes: a valid signature from a revoked
@@ -170,7 +185,8 @@ refused by the pin.
 
 ## Changing the LibTorch version
 
-The CUDA executor binds LibTorch 2.9.0 (tch 0.22). A new version means: download the official
+The CUDA executor binds LibTorch 2.9.0 (tch 0.22), on Linux and on Windows (two archives, two pins:
+`libtorch.sha256` and `libtorch-windows.sha256`). A new version means, for each: download the official
 archive, compute its SHA-256 and size, cross-check them against a second source (the S3 ETag served by
 download.pytorch.org is the MD5 of 100 MB parts: recompute it from the file), write them in
 `deploy/worker/libtorch.sha256`, run the CUDA tests against the unpacked archive
