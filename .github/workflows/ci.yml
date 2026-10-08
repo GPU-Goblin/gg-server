@@ -55,10 +55,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: gg-server
+      # gg-worker is private: read with its read-only deploy key (secret of this repository).
       - uses: actions/checkout@v4
         with:
           repository: GPU-Goblin/gg-worker
           path: gg-worker
+          ssh-key: ${{ secrets.GG_WORKER_DEPLOY_KEY }}
       - name: Toolchain
         working-directory: gg-server
         run: rustup show
