@@ -25,7 +25,7 @@ umask 022
 DEFAULT_RELEASE_URL="https://grid.gpugoblin.com/releases/latest"
 DEFAULT_DIRECTORY_URL="https://gpugoblin.com/servers.json"
 DEFAULT_NETWORK="gg-beta-1"
-RELEASE_ALLOWED_SIGNERS='release@gpu-goblin namespaces="gg-release" REPLACE_WITH_THE_RELEASE_PUBLIC_KEY'
+RELEASE_ALLOWED_SIGNERS='release@gpu-goblin namespaces="gg-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVp1adRtKn6v2iU8hG/jSMsIALjae/LkpY3AODuih9v'
 # ------------------------------------------------------------------------------------------------
 
 PRINCIPAL="release@gpu-goblin"
