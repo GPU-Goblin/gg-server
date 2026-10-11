@@ -907,7 +907,7 @@ dependencies = [
 [[package]]
 name = "burn-tch"
 version = "0.21.0"
-source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#6861f4c4d52de37f5ee2d522f7d93d481b2d413b"
+source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#e384c32a81bf5ef18a2c203de691b56573d3c041"
 dependencies = [
  "burn-backend",
  "cc",
@@ -3068,7 +3068,7 @@ dependencies = [
 [[package]]
 name = "gg-client"
 version = "0.1.0"
-source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#6861f4c4d52de37f5ee2d522f7d93d481b2d413b"
+source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#e384c32a81bf5ef18a2c203de691b56573d3c041"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -3097,7 +3097,7 @@ dependencies = [
 [[package]]
 name = "gg-compute"
 version = "0.1.0"
-source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#6861f4c4d52de37f5ee2d522f7d93d481b2d413b"
+source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#e384c32a81bf5ef18a2c203de691b56573d3c041"
 dependencies = [
  "burn",
  "cubecl-runtime",
@@ -3153,7 +3153,7 @@ dependencies = [
 [[package]]
 name = "gg-core"
 version = "0.1.0"
-source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#6861f4c4d52de37f5ee2d522f7d93d481b2d413b"
+source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#e384c32a81bf5ef18a2c203de691b56573d3c041"
 dependencies = [
  "hex",
  "serde",
@@ -3218,7 +3218,7 @@ dependencies = [
 [[package]]
 name = "gg-protocol"
 version = "0.1.0"
-source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#6861f4c4d52de37f5ee2d522f7d93d481b2d413b"
+source = "git+https://github.com/GPU-Goblin/gg-core?tag=v0.1.0#e384c32a81bf5ef18a2c203de691b56573d3c041"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
