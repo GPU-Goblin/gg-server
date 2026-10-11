@@ -36,8 +36,9 @@ A model larger than any single machine is split into stages that run on differen
 matrix larger than any single machine is tiled. See
 [docs/adr/0024-staged-execution.md](docs/adr/0024-staged-execution.md).
 
-**This is research software; it is not ready for a public deployment**, and no monetary value is
-promised for credits. What actually works, and what does not: [docs/STATUS.md](docs/STATUS.md).
+**This is research software, running as a public beta at grid.gpugoblin.com**; no monetary value
+is promised for credits. What actually works, what does not, and the risks not yet addressed:
+[docs/STATUS.md](docs/STATUS.md) and [docs/RISKS.md](docs/RISKS.md).
 
 ## Repositories
 
