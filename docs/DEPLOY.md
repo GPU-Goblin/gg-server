@@ -40,8 +40,8 @@ The project's domain is `gpugoblin.com`:
 
 | Name | Serves |
 |---|---|
-| `gpugoblin.com` (and `www.`) | the public site: presentation, sign-up, downloads (repository gg-web) |
-| `grid.gpugoblin.com` | the grid: API, researcher portal, signed releases (`/releases/`) — this server |
+| `gpugoblin.com` (and `www.`) | the public site: presentation, accounts (sign-up, sign-in), downloads (repository gg-web) |
+| `grid.gpugoblin.com` | the grid: API, signed releases (`/releases/`) — this server; its former `/portal` pages send to the site's account page |
 | `noreply@gpugoblin.com` | sender of sign-in e-mails |
 
 DNS: an `A` record (and `AAAA` if the server has IPv6) for `grid.gpugoblin.com` pointing to this

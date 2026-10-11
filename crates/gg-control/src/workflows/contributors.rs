@@ -47,12 +47,12 @@ pub async fn send_code(state: &AppState, email: &str) -> Result<bool, ApiError> 
     contributors::insert_code(&mut c, email, &code_hash(email, &code), CODE_TTL_SECS).await?;
     drop(c);
     let body = format!(
-        "Your GPU Goblin verification code is:\n\n    {code}\n\nIt is valid for {} minutes. If you did not ask to lend a machine to GPU Goblin, ignore this\nmessage: nothing happens without the code.\n",
+        "Your GPU Goblin sign-in code is:\n\n    {code}\n\nIt is valid for {} minutes. If you did not ask to sign in to GPU Goblin, ignore this\nmessage: nothing happens without the code.\n",
         CODE_TTL_SECS / 60
     );
     state
         .mailer()
-        .send(email, "Your GPU Goblin verification code", &body)
+        .send(email, "Your GPU Goblin sign-in code", &body)
         .await?;
     Ok(true)
 }

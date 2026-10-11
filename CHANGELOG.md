@@ -2,7 +2,14 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.0] — unreleased
+## [0.1.1] — 2026-10-11
+
+- Release 0.1.1: the contributor software runs on a stock Ubuntu 24.04 (gg-worker's changelog).
+- The sign-in code e-mail speaks of signing in, for researchers and contributors alike.
+- nginx template: the former HTML portal pages redirect to the site's account page.
+- CI reads gg-worker without a deploy key, the repositories being public.
+
+## [0.1.0] — 2026-10-11
 
 First complete version of phases P0 to P9. **This repository is not ready for public
 deployment**: see `docs/RISKS.md`.

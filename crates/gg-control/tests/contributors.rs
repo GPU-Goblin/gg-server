@@ -120,7 +120,7 @@ impl Env {
     async fn newest_code(&self) -> String {
         let (_, mailbox) = self.page("/portal/dev/mailbox", None).await;
         let at = mailbox
-            .find("verification code is:")
+            .find("sign-in code is:")
             .expect("a code in the mailbox");
         mailbox[at..]
             .chars()

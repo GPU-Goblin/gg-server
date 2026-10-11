@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "gg-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3114,7 +3114,7 @@ dependencies = [
 
 [[package]]
 name = "gg-control"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "gg-ledger"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gg-core",
  "gg-storage",
@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "gg-merkle"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "serde",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "gg-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3235,7 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "gg-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gg-core",
  "gg-protocol",
@@ -3253,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "gg-verifier"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -7750,7 +7750,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",

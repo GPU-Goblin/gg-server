@@ -28,7 +28,22 @@ Two layers, both measured by a real probe (`gg-executor probe`, `gg-worker docto
    Unix sockets internally (measured with `strace`: denying `sendmsg`/`recvmsg` makes device creation
    fail); network isolation is provided by the empty network namespace, which also isolates abstract
    Unix sockets.
-   The executor refuses to run unless Landlock is `fully_enforced`.
+   The executor refuses to run unless Landlock is `fully_enforced`, or, since 2026-10-11 (the
+   owner's decision), enforced with every right of an ABI v3 or v4 kernel (Linux 6.2 to 6.9:
+   `enforced_abi_v3`, `enforced_abi_v4`). Those kernels know every filesystem right the ruleset asks
+   for but `IoctlDev` (ABI v5), which the ruleset grants anyway on `/dev`, the only directory of the
+   sandbox holding device nodes: the confinement is the same (`restrict::landlock_holds`, tested
+   against the crate's rights per ABI). Measured on a stock Ubuntu 24.04 server (kernel 6.8):
+   `enforced_abi_v4`, `doctor` passes. Older kernels (ABI v1, v2: no `Truncate`) are refused, among
+   them Debian 12's 6.1.
+
+   **AppArmor (Ubuntu 24.04).** Where `kernel.apparmor_restrict_unprivileged_userns = 1` and no
+   profile covers `bwrap`, bubblewrap cannot build the sandbox ("loopback: Failed RTM_NEWADDR").
+   `install.sh` then offers, and installs only with the owner's consent (sudo), the profile Ubuntu
+   documents for a single program, `/etc/apparmor.d/gpu-goblin-bwrap`: `bwrap` may create user
+   namespaces, as on systems without the restriction. It never adds one when the distribution has
+   its own (Ubuntu 24.10 and later). Measured on the same Ubuntu 24.04 machine: refused without
+   consent with nothing installed, then installed, loaded, and the whole probe holds.
 
 The `sandbox = "none"` mode exists only with `dev_unsafe_no_isolation = true`, and never in public mode.
 `gg-worker doctor` runs the probe in the real configuration: PID namespace, the agent's canary port

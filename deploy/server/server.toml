@@ -125,6 +125,9 @@ contributor_signup = false                 # true once the mail relay works
 # Relay: Brevo. On the server, not in this repository: the SMTP login (Brevo, "SMTP & API" page)
 # as smtp_username, and the SMTP key in /etc/gpu-goblin/server.env as GG_SMTP_PASSWORD=... (0600).
 # Switch provider to "smtp" once noreply@gpugoblin.com is authenticated in Brevo (DKIM, DMARC).
+# Brevo adds an open-tracking image to every message, used only to check delivery (allowed without
+# consent by the CNIL); the privacy page says so and that Brevo keeps its logs 3 months: set the
+# retention of Brevo's transactional logs to 3 months, and change both together.
 provider = "disabled"                      # "smtp" once the relay below is filled in
 smtp_host = "smtp-relay.brevo.com"
 smtp_port = 587
