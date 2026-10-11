@@ -85,9 +85,28 @@ pub fn up() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Ready means the database answers a query over TCP. The image first runs a temporary server on
+/// its Unix socket only, to create the database; `pg_isready` on the socket already succeeds then,
+/// and a client that went on failed with "database does not exist" (seen in CI).
 fn wait_ready() -> anyhow::Result<()> {
+    let (user, password, _, db) = url_parts();
+    let pass = format!("PGPASSWORD={password}");
     for _ in 0..60 {
-        let out = docker(&["exec", &container(), "pg_isready", "-U", "gg"])?;
+        let out = docker(&[
+            "exec",
+            "-e",
+            &pass,
+            &container(),
+            "psql",
+            "-h",
+            "127.0.0.1",
+            "-U",
+            &user,
+            "-d",
+            &db,
+            "-c",
+            "SELECT 1",
+        ])?;
         if out.status.success() {
             return Ok(());
         }
